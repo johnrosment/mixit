@@ -29,7 +29,7 @@ export const GUIDE_HTML = `
 <h2>Files</h2>
 <ul>
   <li><b>In:</b> WAV and AIFF (including the uncompressed AIFF that Logic and other Mac apps export) are read directly at their own sample rate. FLAC, MP3, M4A and OGG are decoded by the browser at 48 kHz.</li>
-  <li><b>Out:</b> <b>Download all</b> packs everything into one ZIP, or grab each file on its own. A master comes as WAV, CD-quality WAV and FLAC with a quality report; a mix comes with its stems (vocals, drums, bass, music, FX). Advanced adds other bit depths and sample rates, versions for each platform, mono, vinyl, loops, frequency layers and 5.1 / 7.1.4 surround with a headphone version.</li>
+  <li><b>Out:</b> <b>Download all</b> packs everything into one ZIP, or grab each file on its own. A master comes as WAV, an MP3 for sharing, CD-quality WAV and FLAC with a quality report; a mix comes as WAV and MP3 with its stems (vocals, drums, bass, music, FX). The MP3 is 320 kbps, or a little lower for long songs so it stays under 10 MB. Advanced adds other bit depths and sample rates, versions for each platform, mono, vinyl, loops, frequency layers and 5.1 / 7.1.4 surround with a headphone version.</li>
 </ul>
 
 <h2>Good to know</h2>

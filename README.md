@@ -16,6 +16,7 @@ account to make and nothing to install.
 2. **Drop your files.** WAV, AIFF, FLAC, MP3 and M4A all work.
 3. **Shape the sound** with eight simple sliders in **Easy**, or switch to **Advanced** for every setting.
 4. **Compare** before and after at the same volume, then **Download all** as one ZIP or save each file on its own.
+   The MP3 is 320 kbps, or a little lower for long songs so it stays under 10 MB for easy sharing.
 
 ## What it does
 
@@ -24,13 +25,13 @@ account to make and nothing to install.
 - Balances them, keeps the vocal steady over the music, and adds reverb, echo and glue.
 - Drop in your own rough bounce and MIXIT copies its balance.
 - **Easy sliders:** vocal level, vocal clarity, lows, highs, punch, reverb, echo, vintage tape.
-- **You get:** the mix, plus each part (vocals, drums, bass, music) as its own file.
+- **You get:** the mix as a WAV and an MP3, plus each part (vocals, drums, bass, music) as its own file.
 
 ### Master
 - Listens to your song first and picks a starting point for it.
 - Drop in a song you love and the tone leans toward it.
 - **Easy sliders:** lows, highs, punch, width, clean-up, reverb, vintage tape, tape hiss.
-- **You get:** a master WAV, a CD-quality WAV, a FLAC and a quality report.
+- **You get:** a master WAV, an MP3 for sharing, a CD-quality WAV, a FLAC and a quality report.
 
 <p align="center"><img src="docs/master.png" alt="The Easy mastering page" width="720"></p>
 
@@ -55,3 +56,9 @@ settings and presets are kept only in your browser.
 - Keep the MIXIT tab in front while it works; browsers slow down tabs in the background.
 - A four-minute song needs roughly 0.5–1 GB of memory while it renders.
 - Easy mode always delivers at streaming volume (-12 LUFS) with a safe peak level.
+
+## Credits
+
+MP3 files are made with [LAME](https://lame.sourceforge.net) through
+[lamejs](https://github.com/zhuker/lamejs), included unmodified under the LGPL
+(see `js/vendor/LAME-LICENSE.txt`).

@@ -8,6 +8,7 @@ import { makeZip } from './zip.js';
 import { trimAndFade, frequencyLayers, makeLoop, assembleAlbum } from './engine/deliver.js';
 import { sha256Hex, qcHtml, manifest } from './qc.js';
 import { renderBinaural } from './binaural.js';
+import { encodeMp3, mp3Bitrate, mp3SizeMb } from './mp3.js';
 import { LAYOUTS } from './engine/spatial.js';
 import {
   fx, sx, metricsTable, kpis, loudnessChart, spectrumChart, correlationChart, gainReductionChart, barChart, curveChart,
@@ -660,6 +661,7 @@ export function initMaster({ engine, onMode }) {
     const masterLoud = loudnessOf(0, 0, rep.output);
     const lo = { lufs: rep.output.loudness.integrated, dbtp: rep.output.peak.truePeakDbtp };
     const masterFile = () => encode(r.master, `${r.base}_master.${ext}`, { loudness: masterLoud, kind: 'master' });
+    const mp3File = async () => { const m = await encodeMp3(finish(r.master), { meta }); return { name: `${r.base}.mp3`, data: m.data, kbps: m.kbps }; };
     const cdFile = () => encode(r.master, `${r.base}_CD_16bit_44k1.wav`, { format: 'wav', bits: 16, dither: 'shaped', outputRate: 44100, loudness: masterLoud, kind: 'CD master' });
     const altFile = () => (ext === 'wav'
       ? encode(r.master, `${r.base}_master_24bit.flac`, { format: 'flac', bits: 24, loudness: masterLoud })
@@ -700,6 +702,8 @@ export function initMaster({ engine, onMode }) {
       const files = [], kinds = [];
       const add = (f, k) => { files.push(f); kinds.push(k); };
       add(await masterFile(), { kind: `Master ${ext.toUpperCase()}`, format: ext, ...lo });
+      const mp3 = await mp3File();
+      add({ name: mp3.name, data: mp3.data }, { kind: `MP3 (${mp3.kbps} kbps, for sharing)`, format: 'mp3', ...lo });
       add(await cdFile(), { kind: 'CD-quality WAV (16-bit, 44.1 kHz, noise-shaped dither)', format: 'wav', ...lo });
       add(await altFile(), { kind: ext === 'wav' ? 'FLAC 24-bit' : 'WAV 24-bit', format: ext === 'wav' ? 'flac' : 'wav', ...lo });
       if (full) {
@@ -721,7 +725,14 @@ export function initMaster({ engine, onMode }) {
       files.push({ name: `${r.base}_QC.html`, data: qc }, { name: 'manifest.json', data: man.json }, { name: 'manifest.txt', data: man.text });
       return files;
     }
-    return { ext, mime, lo, masterFile, cdFile, altFile, extraFile, binauralFile, reportJson, lcsv, scsv, layerFiles, loopFile, qcFor, packageFiles };
+    return { ext, mime, lo, masterFile, mp3File, cdFile, altFile, extraFile, binauralFile, reportJson, lcsv, scsv, layerFiles, loopFile, qcFor, packageFiles };
+  }
+
+  // The MP3 button shows the bitrate it will use and roughly how big the file will be.
+  function mp3Item(audio, make) {
+    const secs = audio.channels[0].length / audio.sr;
+    const kbps = mp3Bitrate(secs);
+    return { label: 'MP3', sub: `${kbps} kbps · about ${mp3SizeMb(kbps, secs).toFixed(1)} MB · for sharing`, easy: true, run: async () => { const x = await make(); download(x.data, x.name, 'audio/mpeg'); } };
   }
 
   function downloadItems(r) {
@@ -739,6 +750,7 @@ export function initMaster({ engine, onMode }) {
         download(makeZip(files), 'masters_all.zip');
       } },
       { label: `Master ${ext}`, sub: `${fx(f.lo.lufs, 1)} LUFS · ${fx(f.lo.dbtp, 1)} dBTP`, easy: true, run: save(f.masterFile, f.mime) },
+      mp3Item(r.master, f.mp3File),
       { label: 'CD-quality WAV', sub: '16-bit, 44.1 kHz', easy: true, run: save(f.cdFile, 'audio/wav') },
       { label: f.ext === 'wav' ? 'FLAC' : 'WAV 24-bit', sub: f.ext === 'wav' ? 'smaller, same quality' : 'uncompressed', easy: true, run: save(f.altFile, f.ext === 'wav' ? 'audio/flac' : 'audio/wav') },
       ...r.extras.map((e) => ({ label: `${e.label.replace(/ \(.*\)/, '')} ${e.layout ? 'WAV' : ext}`, sub: `${fx(e.lufs, 1)} LUFS${e.chs.length === 1 ? ' · mono' : e.layout ? ` · ${e.chs.length} channels` : ''}`, run: save(() => f.extraFile(e), e.layout ? 'audio/wav' : f.mime) })),

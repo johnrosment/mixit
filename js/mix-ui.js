@@ -6,6 +6,7 @@ import { encodeWav } from './engine/wav.js';
 import { ABPlayer } from './player.js';
 import { makeZip } from './zip.js';
 import { renderBinaural } from './binaural.js';
+import { encodeMp3, mp3Bitrate, mp3SizeMb } from './mp3.js';
 import { chart, legend } from './charts.js';
 import { NOTE_NAMES, noteName } from './engine/pitch.js';
 import { LAYOUTS } from './engine/spatial.js';
@@ -546,8 +547,11 @@ export function initMix({ engine, sendToMaster, onMode }) {
     const BUS_NAMES = Object.fromEntries(CATEGORIES);
     // Download all: the mix and each bus stem; in Advanced also the surround
     // files and data files.
+    const mixMp3 = async () => ({ name: 'mix.mp3', data: (await encodeMp3({ sr: r.sr, channels: r.channels }, { meta: { title: 'Mix' } })).data });
+    const secs = r.channels[0].length / r.sr;
+    const kbps = mp3Bitrate(secs);
     const packageFiles = async (full) => {
-      const files = [await wav(r.channels, 'mix.wav')];
+      const files = [await wav(r.channels, 'mix.wav'), await mixMp3()];
       for (const [k, chs] of Object.entries(r.busStems || {})) files.push(await wav(chs, `stems/${k}.wav`));
       if (full && r.spatial) {
         files.push(await wav(r.spatial.chs, `mix_spatial_${tag}.wav`, LAYOUTS[r.spatial.layout].mask));
@@ -559,6 +563,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
     const items = [
       { label: 'Download all (ZIP)', sub: r.busStems ? 'the mix and every stem below' : 'every file below', primary: true, easy: true, run: async () => download(makeZip(await packageFiles(document.documentElement.dataset.mode !== 'easy')), 'mix_all.zip') },
       { label: 'Mix WAV', sub: `${fx(out.loudness.integrated, 1)} LUFS · ${fx(out.peak.truePeakDbtp, 1)} dBTP`, easy: true, run: async () => { const f = await wav(r.channels, 'mix.wav'); download(f.data, f.name, 'audio/wav'); } },
+      { label: 'Mix MP3', sub: `${kbps} kbps · about ${mp3SizeMb(kbps, secs).toFixed(1)} MB · for sharing`, easy: true, run: async () => { const f = await mixMp3(); download(f.data, f.name, 'audio/mpeg'); } },
       ...Object.entries(r.busStems || {}).map(([k, chs]) => ({ label: `${BUS_NAMES[k] || k} stem`, sub: 'WAV, processed', easy: true, run: async () => { const f = await wav(chs, `${k}.wav`); download(f.data, f.name, 'audio/wav'); } })),
     ];
     if (r.spatial) {
