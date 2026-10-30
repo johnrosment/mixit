@@ -1,7 +1,8 @@
 // MP3 for easy sharing: LAME (lamejs) in its own worker, 320 kbps unless the
 // file would pass about 10 MB (a common chat upload limit), then the highest
 // bitrate that fits. MP3 only allows 32, 44.1 and 48 kHz, so other rates are
-// converted first. An ID3v2.3 tag carries the title and artist.
+// converted first. Peaks are brought down to -1.5 dBTP before encoding, as
+// MP3 encoding pushes peaks up a little. An ID3v2.3 tag carries the title and artist.
 
 import { resample } from './audio-io.js';
 
@@ -40,14 +41,20 @@ function id3(meta) {
   return tag;
 }
 
-/** audio: { sr, channels } → { data: Uint8Array, kbps, sr } */
-export async function encodeMp3(audio, { meta = {} } = {}) {
+const MP3_PEAK = -1.5; // dBTP
+
+/** audio: { sr, channels } → { data: Uint8Array, kbps, sr }. `peakDbtp` is the audio's true peak, if known. */
+export async function encodeMp3(audio, { meta = {}, peakDbtp = null } = {}) {
   let a = audio;
   const sr = mp3Rate(a.sr);
   if (sr !== a.sr) a = await resample(a, sr);
   const kbps = mp3Bitrate(a.channels[0].length / sr);
   // Copies, so the master stays playable; mono becomes two equal channels.
   const chs = [a.channels[0].slice(), (a.channels[1] || a.channels[0]).slice()];
+  if (peakDbtp != null && peakDbtp > MP3_PEAK) {
+    const g = Math.pow(10, (MP3_PEAK - peakDbtp) / 20);
+    for (const ch of chs) for (let i = 0; i < ch.length; i++) ch[i] *= g;
+  }
   const worker = new Worker(new URL('./mp3-worker.js', import.meta.url));
   try {
     const frames = await new Promise((resolve, reject) => {

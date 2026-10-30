@@ -4,15 +4,16 @@
 
 import { integratedLufs, hopEnergies, truePeak, lin2db } from './loudness.js';
 import { compress, deess, transientShape, detectorDb, percentileDb } from './dynamics.js';
-import { toneEq, width, pan, gain, reverb, delay, addInto, saturate } from './effects.js';
-import { design, cascade, lr4Split3 } from './filters.js';
+import { toneEq, width, pan, gain, reverb, delay, addInto, saturate, chorus } from './effects.js';
+import { design, cascade, lr4Split2, lr4Split3, zeroPhaseLowpass } from './filters.js';
 import { analyze } from './analyze.js';
-import { ltas, bandCenters, bandLevels, referenceCurve, spectralProcess } from './spectral.js';
+import { ltas, bandCenters, bandLevels, referenceCurve, spectralProcess, rhythm } from './spectral.js';
 import { finalize } from './master.js';
 import { bedFromBuses, loudnessWeights, channelLevels } from './spatial.js';
 import { tuneVocal, SCALES } from './pitch.js';
 import { detectSections, sectionMoves, sectionCurve } from './sections.js';
 import { roughFeatures, stemFeatures, addFeatures, fitBalance } from './roughmix.js';
+import { lowCutFreq, resonantCuts } from './stemtools.js';
 
 export const BUS_KEYS = ['vocals', 'drums', 'bass', 'music', 'fx'];
 
@@ -29,6 +30,33 @@ const TONES = {
 };
 
 const stereoBuf = (n) => [new Float32Array(n), new Float32Array(n)];
+
+// Compression by instrument: vocals level gently (medium attack, fast
+// release); percussion takes high ratios with quick times; kick, snare and
+// toms keep their attack; bass sits at 3-6:1; keys and pads stay light.
+function compSettings(st) {
+  const c = st.comp, punch = st.compMode === 'punch';
+  const base = { knee: 6, thresholdPct: 0.75, thresholdOffset: -8 * c };
+  if (st.category === 'vocals') return { ...base, ratio: 1.6 + 1.6 * c + (st.role === 'lead' ? 0 : 0.6), attack: punch ? 20 : 12, release: 70, rmsMs: 5 };
+  if (st.category === 'drums') {
+    if (st.drumRole === 'perc') return { ...base, ratio: 3 + 5 * c, attack: punch ? 8 : 3, release: 30, knee: 4, rmsMs: 0, thresholdPct: 0.8 };
+    if (st.drumRole === 'cymbals') return { ...base, ratio: 1.5 + 1.5 * c, attack: 5, release: 80, rmsMs: 2 };
+    if (st.drumRole === 'kick' || st.drumRole === 'snare' || st.drumRole === 'toms') return { ...base, ratio: 1.5 + 2.5 * c, attack: punch ? 18 : 10, release: 80, rmsMs: 0, thresholdPct: 0.8, thresholdOffset: -6 * c };
+    return { ...base, ratio: 1.5 + 3.5 * c, attack: punch ? 18 : 6, release: 90, rmsMs: 0 };
+  }
+  if (st.category === 'bass') return { ...base, ratio: 2.5 + 3.5 * c, attack: punch ? 15 : 8, release: 90, rmsMs: 5 };
+  if (st.category === 'music') return { ...base, ratio: 1.3 + 1.4 * c, attack: punch ? 25 : 15, release: 150, knee: 8, rmsMs: 10, thresholdOffset: -6 * c };
+  return { ...base, ratio: 1.5 + 3.5 * c, attack: punch ? 18 : 4, release: punch ? 140 : 110, rmsMs: punch ? 0 : 5 };
+}
+
+// Highest the automatic high-pass may go, by instrument (kick, bass and full
+// drum kits keep their lows).
+function hpfCap(st) {
+  if (st.category === 'bass') return 0;
+  if (st.category === 'drums') return st.drumRole === 'cymbals' ? 250 : st.drumRole === 'snare' || st.drumRole === 'toms' || st.drumRole === 'perc' ? 100 : 0;
+  if (st.category === 'vocals') return st.role === 'lead' ? 120 : 180;
+  return st.category === 'fx' ? 150 : 120;
+}
 
 const fmtTime = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
 
@@ -119,21 +147,50 @@ export class MixSession {
     gain(chs, st.gain || 0);
     // Unprocessed levels per bus for matching your rough mix (after your stem gain).
     if (this.rough && audible) { const k = st.category in BUS_TARGETS ? st.category : 'music'; this.roughBus[k] = addFeatures(this.roughBus[k], stemFeatures(chs, sr)); }
-    toneEq(chs, sr, { hpf: st.hpf, low: st.eqLow, lowFreq: 120, mid: st.eqMid, midFreq: 1500, high: st.eqHigh, highFreq: 7000 });
-    row.steps.push(`HPF ${st.hpf || 0} Hz, EQ ${fmt(st.eqLow || 0)}/${fmt(st.eqMid || 0)}/${fmt(st.eqHigh || 0)} dB`);
+    // High-pass everything but kick and bass: raised to just under where the
+    // stem's useful low end starts (at most the cap for its type).
+    let hpf = st.hpf || 0;
+    const cap = hpfCap(st);
+    if (st.hpfAuto !== false && audible && cap > hpf) {
+      const probe = chs.map((ch) => ch.subarray(0, Math.min(n, sr * 120)));
+      const auto = lowCutFreq(probe, sr, { min: hpf, max: cap });
+      if (auto > hpf + 2) { row.steps.push(`High-pass raised ${hpf} → ${auto} Hz (nothing useful below)`); hpf = auto; }
+    }
+    row.hpf = hpf;
+    toneEq(chs, sr, { hpf, low: st.eqLow, lowFreq: 120, mid: st.eqMid, midFreq: 1500, high: st.eqHigh, highFreq: 7000 });
+    row.steps.push(`HPF ${hpf} Hz, EQ ${fmt(st.eqLow || 0)}/${fmt(st.eqMid || 0)}/${fmt(st.eqHigh || 0)} dB`);
     if (st.deess && st.category === 'vocals') {
       const d = deess(chs, sr, { amount: 0.55 });
       row.deess = d;
       row.steps.push(`De-ess active ${d.activePct.toFixed(1)}%, max ${d.maxGr.toFixed(1)} dB`);
     }
+    // Harsh, metallic cymbals: a de-esser tuned higher.
+    if (st.category === 'drums' && st.drumRole === 'cymbals' && audible) {
+      const d = deess(chs, sr, { amount: 0.35, split: 6000 });
+      row.steps.push(`Cymbal harshness tamed: active ${d.activePct.toFixed(1)}%, max ${d.maxGr.toFixed(1)} dB above 6 kHz`);
+    }
+    if (st.category === 'vocals' && audible) {
+      // Narrow cuts where the voice sounds boxy (400-800 Hz) or nasal (2-4 kHz).
+      const cuts = resonantCuts(chs, sr, [[400, 800, 'boxy'], [2000, 4000, 'nasal']], { minDb: 4, maxCut: 2.5, q: 4, trendBands: 4 });
+      if (cuts.length) {
+        toneEq(chs, sr, { extra: cuts.map((c) => ({ type: 'peaking', freq: c.freq, q: c.q, gain: c.gainDb })) });
+        row.steps.push(`Narrow ${cuts.map((c) => `${fmt(c.gainDb)} dB at ${c.freq} Hz (${c.range})`).join(', ')}`);
+      }
+      // Soft limiter catches the highest peaks first, so the compressor can stay gentle.
+      if (st.comp > 0.01) {
+        const l = compress(chs, sr, { ratio: 10, attack: 1, release: 60, knee: 8, rmsMs: 0, thresholdPct: 0.985, thresholdOffset: 0, makeup: 0, maxGr: 6 });
+        row.steps.push(`Peak limiter on the loudest notes: max ${l.maxGr.toFixed(1)} dB`);
+      }
+    }
     if (st.comp > 0.01) {
-      const punch = st.compMode === 'punch';
-      const c = compress(chs, sr, {
-        ratio: 1.5 + 3.5 * st.comp, attack: punch ? 18 : 4, release: punch ? 140 : 110, knee: 6,
-        rmsMs: punch ? 0 : 5, thresholdPct: 0.75, thresholdOffset: -8 * st.comp,
-      });
+      const c = compress(chs, sr, compSettings(st));
       row.comp = { ...c, curve: undefined };
-      row.steps.push(`Compression ${c.ratio.toFixed(1)}:1 (${punch ? 'punch' : 'smooth'}), avg ${c.avgGr.toFixed(1)} dB, max ${c.maxGr.toFixed(1)} dB`);
+      row.steps.push(`Compression ${c.ratio.toFixed(1)}:1 (${st.compMode === 'punch' ? 'punch' : 'smooth'}${st.drumRole ? `, ${st.drumRole}` : ''}), avg ${c.avgGr.toFixed(1)} dB, max ${c.maxGr.toFixed(1)} dB`);
+    }
+    if (st.category === 'vocals' && audible) {
+      // Light tape saturation on top for character.
+      saturate(chs, sr, { drive: 3, mode: 'tape', mix: 0.3 });
+      row.steps.push('Light tape saturation (30% blend)');
     }
     if ((st.width ?? 1) !== 1 || st.monoBass) {
       width(chs, { amount: st.width ?? 1, monoHz: st.monoBass ? 120 : 0, sr });
@@ -170,6 +227,13 @@ export class MixSession {
       gain(B.vocalSupport, g);
       log.push(`Doubles/backing balanced ${fmt(SUPPORT_OFFSET)} LU under the lead (${fmt(g)} dB).`);
     }
+    // A touch of chorus on the lead vocal (8% or less) for movement around the centre.
+    if (this.used.vocalLead && (s.vocalChorus ?? 0.06) > 0.001) {
+      chorus(B.vocalLead, sr, { mix: s.vocalChorus ?? 0.06 });
+      log.push(`Lead vocal: ${Math.round((s.vocalChorus ?? 0.06) * 100)}% chorus for a little movement around the centre.`);
+    }
+    // Backing vocals get extra reverb; their send is taken here and follows the vocal bus level later.
+    const supportVerb = this.used.vocalSupport ? B.vocalSupport.map((ch) => Float32Array.from(ch, (v) => v * 0.5)) : null;
     const vocals = B.vocalLead;
     addInto(vocals, B.vocalSupport, 1);
     const buses = { vocals, drums: B.drums, bass: B.bass, music: B.music, fx: B.fx };
@@ -208,6 +272,19 @@ export class MixSession {
     }
     if (balance && !(rough && !rough.rejected)) log.push(`Source-aware balance${amount < 0.99 ? ` (${Math.round(amount * 100)}% of the way to an even balance)` : ''}: ${keys.map((k) => `${k} ${fmt(busReports[k].autoGainDb)} dB`).join(', ')}.`);
 
+    // --- Tempo: echo time and compressor release follow the song ---
+    let tempo = 0;
+    const beatSrc = used.drums ? buses.drums : used.music ? buses.music : used.bass ? buses.bass : null;
+    if (beatSrc) {
+      const rh = rhythm(beatSrc, sr);
+      if (rh.bpm >= 60 && rh.bpm <= 200 && rh.confidence > 0.15) tempo = rh.bpm;
+    }
+    const eighthMs = tempo ? 30000 / tempo : 0;
+    const glueRelease = eighthMs ? Math.max(80, Math.min(300, eighthMs)) : 0;
+    if (tempo) log.push(`Tempo about ${tempo} BPM: compressor releases follow an eighth note (${Math.round(glueRelease)} ms)${s.delay?.enabled && s.delaySync !== false ? ' and the echo locks to the beat' : ''}.`);
+    // Loudness-neutral character stages, so the balance set above holds.
+    const keepLevel = (b, fn) => { const before = integratedLufs(b, sr); const r = fn(); const after = integratedLufs(b, sr); if (before > -70 && after > -70) gain(b, before - after); return r; };
+
     // --- Bus processing ---
     progress('Processing buses', 0.2);
     for (const key of BUS_KEYS) {
@@ -227,21 +304,58 @@ export class MixSession {
       if (key === 'drums' && Math.abs((s.transientEnergy ?? 0.5) - 0.5) > 0.01) {
         rep.transient = transientShape(b, sr, ((s.transientEnergy ?? 0.5) - 0.5) * 2);
       }
+      if (key === 'drums') {
+        // Parallel compression: a hard-squashed copy blended under the drums for weight,
+        // then a little tape saturation (under 30%) as glue.
+        const par = s.drumParallel ?? 0.3, drive = s.drumDrive ?? 0.35;
+        keepLevel(b, () => {
+          if (par > 0.01) {
+            const c = compress(b, sr, { ratio: 8, attack: 0.1, release: glueRelease ? Math.min(120, glueRelease) : 80, knee: 4, rmsMs: 0, thresholdPct: 0.6, thresholdOffset: -6, mix: par, maxGr: 18, makeup: 6 });
+            rep.parallel = `Parallel compression ${Math.round(par * 100)}% (8:1 copy, avg ${c.avgGr.toFixed(1)} dB)`;
+          }
+          if (drive > 0.01) { saturate(b, sr, { drive: 6 * drive, mode: 'tape', mix: 0.25 }); rep.drive = `Tape saturation ${(6 * drive).toFixed(1)} dB, 25% blend`; }
+        });
+      }
       if (key === 'bass') {
         const t = s.bassTightness ?? 0.5;
         toneEq(b, sr, { hpf: 25 + t * 20, extra: [{ type: 'peaking', freq: 250, q: 1, gain: -t * 2 }] });
         const c = compress(b, sr, { ratio: 2 + 3 * t, attack: 10, release: 90, knee: 6, rmsMs: 8, thresholdPct: 0.7, thresholdOffset: -6 * t });
         rep.tightness = `HPF ${(25 + t * 20).toFixed(0)} Hz, 250 Hz ${fmt(-t * 2)} dB, compression avg ${c.avgGr.toFixed(1)} dB`;
+        const grit = s.bassGrit ?? 0.3;
+        if (grit > 0.01) {
+          // Harmonics of the bass's own notes, kept above 300 Hz, so it is heard on small speakers.
+          keepLevel(b, () => {
+            for (const ch of b) {
+              const lo = zeroPhaseLowpass(ch, 250, sr);
+              let pk = 0;
+              for (let i = 0; i < n; i++) { const a = Math.abs(lo[i]); if (a > pk) pk = a; }
+              const drive = pk > 0 ? 2.5 / pk : 1;
+              const p = new Float32Array(n);
+              for (let i = 0; i < n; i++) p[i] = (Math.tanh(lo[i] * drive) / drive - lo[i]);
+              const pl = zeroPhaseLowpass(p, 300, sr);
+              for (let i = 0; i < n; i++) ch[i] += (p[i] - pl[i]) * 1.5 * grit;
+            }
+          });
+          rep.grit = `Bass harmonics ${Math.round(grit * 100)}% (above 300 Hz)`;
+        }
       }
       if (key === 'music') {
         const w = s.stereoWidth ?? 0.5;
         width(b, { amount: 0.6 + 0.8 * w, sr, monoHz: 0 });
         rep.width = 0.6 + 0.8 * w;
+        if (s.musicCleanup !== false) {
+          // Muddy (150-500 Hz) or boxy (500 Hz-1 kHz) build-up in the instruments is cut where it stands out.
+          const cuts = resonantCuts(b, sr, [[150, 500, 'muddy'], [500, 1000, 'boxy']], { minDb: 3, maxCut: 3, q: 1.4 });
+          if (cuts.length) {
+            toneEq(b, sr, { extra: cuts.map((c) => ({ type: 'peaking', freq: c.freq, q: c.q, gain: c.gainDb })) });
+            rep.cleanup = cuts.map((c) => `${fmt(c.gainDb)} dB at ${c.freq} Hz (${c.range})`).join(', ');
+          }
+        }
       }
       if (TONES[cfg.tone] && TONES[cfg.tone].length) toneEq(b, sr, { extra: TONES[cfg.tone] });
       if ((cfg.width ?? 1) !== 1) width(b, { amount: cfg.width, sr, monoHz: 0 });
       if ((cfg.glue || 0) > 0.01) {
-        const c = compress(b, sr, { ratio: 1.5 + 2.5 * cfg.glue, attack: 20, release: 150, knee: 8, rmsMs: 10, thresholdPct: 0.7, thresholdOffset: -6 * cfg.glue });
+        const c = compress(b, sr, { ratio: 1.5 + 2.5 * cfg.glue, attack: 20, release: glueRelease || 150, knee: 8, rmsMs: 10, thresholdPct: 0.7, thresholdOffset: -6 * cfg.glue, adaptive: true });
         rep.glue = { ratio: c.ratio, avgGr: c.avgGr, maxGr: c.maxGr };
       }
     }
@@ -262,6 +376,11 @@ export class MixSession {
     if (used.vocals && used.music && (s.duckAmount || 0) > 0) {
       duck = this.duckUnderVocals(buses.music, buses.vocals, s.duckAmount, s.duckRelease || 180);
       log.push(`Music ducks up to ${s.duckAmount} dB in the vocal range (250 Hz-5 kHz) while the vocal is active; average ${duck.avgGr.toFixed(2)} dB.`);
+    }
+    if (used.vocals && used.drums && (s.duckAmount || 0) > 0) {
+      // Kick harmonics and snare snap (2-5 kHz) step back a little while the vocal sings.
+      const dd = this.duckUnderVocals(buses.drums, buses.vocals, Math.min(2, 0.4 * s.duckAmount), s.duckRelease || 180, { lo: 2000, hi: 5000, hiShare: 0 });
+      log.push(`Drums dip up to ${Math.min(2, 0.4 * s.duckAmount).toFixed(1)} dB between 2 and 5 kHz under the vocal, so snare snap and kick click do not mask it (average ${dd.avgGr.toFixed(2)} dB).`);
     }
     if (used.drums && used.bass && (s.bassDuck || 0) > 0) {
       bassDuck = this.duckBassUnderKick(buses.bass, buses.drums, s.bassDuck);
@@ -296,42 +415,91 @@ export class MixSession {
         for (let i = 0; i < n; i++) { const mid = 0.5 * (L[i] + R[i]), side = 0.5 * (L[i] - R[i]) * w[i]; L[i] = mid + side; R[i] = mid - side; }
       }
       if (used.vocals && moves.some((m) => Math.abs(m.send - 1) > 0.005)) sendCurve = sectionCurve(moves, (m) => m.send, n, sr);
+      // Thinner verses, full-range choruses: low and high shelves on the music and FX follow the sections.
+      if (moves.some((m) => Math.abs(m.lows ?? 0) > 0.05 || Math.abs(m.highs ?? 0) > 0.05)) {
+        const lowC = sectionCurve(moves, (m) => m.lows ?? 0, n, sr), highC = sectionCurve(moves, (m) => m.highs ?? 0, n, sr);
+        const lowS = [design('lowshelf', 150, sr, 0.7, -3)], highS = [design('highshelf', 6000, sr, 0.7, -3)];
+        for (const key of ['music', 'fx']) {
+          if (!used[key]) continue;
+          for (const ch of buses[key]) {
+            const lo = cascade(lowS, ch, new Float32Array(n)), hi = cascade(highS, ch, new Float32Array(n));
+            for (let i = 0; i < n; i++) ch[i] += (lo[i] - ch[i]) * (lowC[i] / -3) + (hi[i] - ch[i]) * (highC[i] / -3);
+          }
+        }
+      }
       sections = {
         detected: !edited, amount: s.sectionAuto || 0, curves, stepSec: 0.1,
-        list: moves.map((m) => ({ start: m.start, end: m.end, label: m.label, rel: m.rel, lufs: m.lufs, offsets: m.offsets || {}, gains: m.gains, width: m.width, send: m.send })),
+        list: moves.map((m) => ({ start: m.start, end: m.end, label: m.label, rel: m.rel, lufs: m.lufs, offsets: m.offsets || {}, gains: m.gains, width: m.width, send: m.send, lows: m.lows, highs: m.highs })),
       };
       log.push(`Section automation: ${moves.length} section${moves.length > 1 ? 's' : ''} ${edited ? '(your edited boundaries)' : 'found'} (${moves.map((m) => m.label).join(', ')}). ${moves.filter((m) => Object.values(m.gains).some((g) => Math.abs(g) >= 0.05)).map((m) => `${fmtTime(m.start)} ${m.label}: ${Object.entries(m.gains).filter(([k, g]) => used[k] && Math.abs(g) >= 0.05).map(([k, g]) => `${k} ${fmt(g)}`).join(', ')} dB`).join('; ') || 'No level moves.'}`);
     }
 
     // --- Effects returns ---
     progress('Reverb and delay', 0.6);
-    const revIn = stereoBuf(n), dlyIn = stereoBuf(n);
+    // The echo locks to the song (a quarter note, or an eighth if a quarter is too long or short).
+    let delayMs = s.delay?.time ?? 300;
+    if (s.delay?.enabled && s.delaySync !== false && tempo) {
+      const q = 60000 / tempo;
+      delayMs = [q, q / 2, q * 2].find((t) => t >= 220 && t <= 650) || delayMs;
+    }
+    const vocalBusGain = used.vocals ? Math.pow(10, ((busReports.vocals?.autoGainDb || 0) + (busReports.vocals?.userGainDb || 0)) / 20) : 1;
+    // With alternate mixes, vocal and instrument returns are kept apart.
+    const split = !!s.alternates;
+    const revVoc = stereoBuf(n), revOther = split ? stereoBuf(n) : revVoc;
+    const dlyVoc = stereoBuf(n), dlyOther = split ? stereoBuf(n) : dlyVoc;
     let anyRev = false, anyDly = false;
     for (const key of BUS_KEYS) {
       if (!used[key]) continue;
       const cfg = s.buses[key] || {};
-      if (s.reverb?.enabled && cfg.sendReverb > 0 && key === 'vocals' && sendCurve) {
-        // Drier verses, wetter hooks: the vocal reverb send follows the sections.
-        for (let c = 0; c < 2; c++) { const src = buses[key][c], dst = revIn[c]; for (let i = 0; i < n; i++) dst[i] += src[i] * cfg.sendReverb * sendCurve[i]; }
-        anyRev = true;
-      } else if (s.reverb?.enabled && cfg.sendReverb > 0) { addInto(revIn, buses[key], cfg.sendReverb); anyRev = true; }
-      if (s.delay?.enabled && cfg.sendDelay > 0) { addInto(dlyIn, buses[key], cfg.sendDelay); anyDly = true; }
+      if (key === 'vocals') {
+        if (s.reverb?.enabled && cfg.sendReverb > 0) {
+          // Drier verses, wetter hooks; band-limited to 200 Hz-5 kHz so the reverb sits under the sibilance.
+          const send = buses.vocals.map((ch) => new Float32Array(ch));
+          if (sendCurve) for (const c of send) for (let i = 0; i < n; i++) c[i] *= sendCurve[i];
+          if (supportVerb) addInto(send, supportVerb, vocalBusGain);
+          toneEq(send, sr, { hpf: 200, extra: [{ type: 'lowpass', freq: 5000, q: 0.7 }, { type: 'lowpass', freq: 5000, q: 0.7 }] });
+          addInto(revVoc, send, cfg.sendReverb);
+          anyRev = true;
+        }
+        if (s.delay?.enabled && cfg.sendDelay > 0) {
+          // Hard syllables are de-essed out of the echo send.
+          const send = buses.vocals.map((ch) => new Float32Array(ch));
+          deess(send, sr, { amount: 0.9 });
+          toneEq(send, sr, { hpf: 200, extra: [{ type: 'lowpass', freq: 6000, q: 0.7 }] });
+          addInto(dlyVoc, send, cfg.sendDelay);
+          anyDly = true;
+        }
+      } else {
+        if (s.reverb?.enabled && cfg.sendReverb > 0) { addInto(revOther, buses[key], cfg.sendReverb); anyRev = true; }
+        if (s.delay?.enabled && cfg.sendDelay > 0) { addInto(dlyOther, buses[key], cfg.sendDelay); anyDly = true; }
+      }
     }
-    const mix = stereoBuf(n);
-    const returns = [];
-    for (const key of BUS_KEYS) if (used[key]) addInto(mix, buses[key], 1);
+    // Returns roll off lows and highs (the depth lives in the mids).
+    const revGain = Math.pow(10, (s.reverb?.level ?? -12) / 20) * 6;
+    const dlyGain = Math.pow(10, (s.delay?.level ?? -16) / 20);
+    const runRev = (src) => gain(reverb(src[0], src[1], sr, { kind: s.reverb.kind, decay: s.reverb.decay, predelayMs: s.reverb.predelay, hp: 200, lp: 9000 }), 20 * Math.log10(revGain));
+    const runDly = (src) => gain(delay(src[0], src[1], sr, { timeMs: delayMs, feedback: s.delay.feedback, pingpong: s.delay.pingpong, hp: 200, lp: 7000 }), 20 * Math.log10(dlyGain));
+    const ret = { voc: [], other: [] };
     if (anyRev) {
-      const r = reverb(revIn[0], revIn[1], sr, { kind: s.reverb.kind, decay: s.reverb.decay, predelayMs: s.reverb.predelay, hp: 150, lp: 11000 });
-      addInto(mix, r, Math.pow(10, (s.reverb.level ?? -12) / 20) * 6);
-      if (s.spatial) returns.push(gain(r, (s.reverb.level ?? -12) + 20 * Math.log10(6)));
-      log.push(`Reverb (${s.reverb.kind}, ${s.reverb.decay}s, ${s.reverb.predelay} ms pre-delay) returned at ${s.reverb.level} dB.`);
+      ret.voc.push(runRev(revVoc));
+      if (split) ret.other.push(runRev(revOther));
+      log.push(`Reverb (${s.reverb.kind}, ${s.reverb.decay}s, ${s.reverb.predelay} ms pre-delay) returned at ${s.reverb.level} dB, rolled off below 200 Hz and above 9 kHz; the vocal's send is limited to 200 Hz-5 kHz${supportVerb ? ' and backing vocals get extra' : ''}.`);
     }
     if (anyDly) {
-      const d = delay(dlyIn[0], dlyIn[1], sr, { timeMs: s.delay.time, feedback: s.delay.feedback, pingpong: s.delay.pingpong, hp: 200, lp: 9000 });
-      addInto(mix, d, Math.pow(10, (s.delay.level ?? -16) / 20));
-      if (s.spatial) returns.push(gain(d, s.delay.level ?? -16));
-      log.push(`Delay ${s.delay.time} ms, feedback ${Math.round(s.delay.feedback * 100)}%${s.delay.pingpong ? ', ping-pong' : ''}, returned at ${s.delay.level} dB.`);
+      ret.voc.push(runDly(dlyVoc));
+      if (split) ret.other.push(runDly(dlyOther));
+      log.push(`Echo ${Math.round(delayMs)} ms${delayMs !== s.delay.time ? ' (locked to the tempo)' : ''}, feedback ${Math.round(s.delay.feedback * 100)}%${s.delay.pingpong ? ', ping-pong' : ''}, returned at ${s.delay.level} dB; the vocal's echo send is de-essed.`);
     }
+    const returns = [...ret.voc, ...ret.other];
+    // Sum of buses (each with a gain in dB, -Infinity to leave out) and returns.
+    const sumMix = (g = {}, vocRet = 0, otherRet = 0) => {
+      const m = stereoBuf(n);
+      for (const key of BUS_KEYS) if (used[key] && g[key] !== -Infinity) addInto(m, buses[key], Math.pow(10, (g[key] || 0) / 20));
+      if (vocRet !== -Infinity) for (const r of ret.voc) addInto(m, r, Math.pow(10, vocRet / 20));
+      if (otherRet !== -Infinity) for (const r of ret.other) addInto(m, r, Math.pow(10, otherRet / 20));
+      return m;
+    };
+    const mix = sumMix();
 
     // --- Spatial bed (from the processed buses and returns, before the stereo mix bus) ---
     let spatial = null;
@@ -343,31 +511,37 @@ export class MixSession {
       log.push(`Spatial ${s.spatial.layout} bed: lead vocal and bass mids partly in the centre, music, FX and effect returns opened into the surrounds${s.spatial.layout === '7.1.4' ? ' and heights' : ''}, kick and bass lows in the LFE. ${f.achievedLufs.toFixed(1)} LUFS at ${f.truePeakDbtp.toFixed(2)} dBTP (BS.1770 channel weights; the stereo mix-bus glue is not applied to the bed).`);
     }
 
-    // --- Mix bus ---
+    // --- Mix bus (kept light: the mix should already work before it) ---
     progress('Mix bus', 0.7);
     const lows = s.mixLow || 0, highs = s.mixHigh || 0, tape = s.mixTape || 0;
-    if (lows || highs || tape > 0.01) {
-      toneEq(mix, sr, { low: lows, lowFreq: 120, high: highs - 1.5 * tape, highFreq: 8000 });
-      if (tape > 0.01) saturate(mix, sr, { drive: 5 * tape, mode: 'tape' });
-      log.push(`Mix-bus tone: lows ${fmt(lows)} dB at 120 Hz, highs ${fmt(highs - 1.5 * tape)} dB above 8 kHz${tape > 0.01 ? `, tape saturation ${(5 * tape).toFixed(1)} dB drive` : ''}.`);
-    }
-    let mixGlue = null;
-    if ((s.mixGlue || 0) > 0.01) {
-      mixGlue = compress(mix, sr, { ratio: 1.4 + 1.6 * s.mixGlue, attack: 30, release: 220, knee: 10, rmsMs: 15, thresholdPct: 0.7, thresholdOffset: -5 * s.mixGlue });
-      log.push(`Mix-bus glue ${mixGlue.ratio.toFixed(2)}:1, average ${mixGlue.avgGr.toFixed(1)} dB.`);
-    }
+    let roughCurve = null;
+    const busChain = (m, quiet = false) => {
+      if (lows || highs || tape > 0.01) {
+        toneEq(m, sr, { low: lows, lowFreq: 120, high: highs - 1.5 * tape, highFreq: 8000 });
+        if (tape > 0.01) saturate(m, sr, { drive: 5 * tape, mode: 'tape' });
+        if (!quiet) log.push(`Mix-bus tone: lows ${fmt(lows)} dB at 120 Hz, highs ${fmt(highs - 1.5 * tape)} dB above 8 kHz${tape > 0.01 ? `, tape saturation ${(5 * tape).toFixed(1)} dB drive` : ''}.`);
+      }
+      let glue = null;
+      if ((s.mixGlue || 0) > 0.01) {
+        glue = compress(m, sr, { ratio: 1.4 + 1.6 * s.mixGlue, attack: 30, release: glueRelease ? Math.max(120, glueRelease) : 220, knee: 10, rmsMs: 15, thresholdPct: 0.7, thresholdOffset: -5 * s.mixGlue, adaptive: true });
+        if (!quiet) log.push(`Mix-bus glue ${glue.ratio.toFixed(2)}:1, average ${glue.avgGr.toFixed(1)} dB.`);
+      }
+      if (roughCurve) { const res = spectralProcess(m, sr, { staticCurve: roughCurve }); m[0] = res.chs[0]; m[1] = res.chs[1]; }
+      return glue;
+    };
+    const mixGlue = busChain(mix);
 
     // --- Tone of your rough mix (static EQ toward its long-term spectrum) ---
     let roughTone = null;
     if (this.rough && (s.roughTone || 0) > 0.01) {
       progress('Matching your rough mix tone', 0.74);
       const spec = ltas(mix, sr);
-      const curve = referenceCurve(spec, this.rough.spec, { strength: s.roughTone, maxDb: 4, fraction: 2 });
-      const res = spectralProcess(mix, sr, { staticCurve: curve });
+      roughCurve = referenceCurve(spec, this.rough.spec, { strength: s.roughTone, maxDb: 4, fraction: 2 });
+      const res = spectralProcess(mix, sr, { staticCurve: roughCurve });
       mix[0] = res.chs[0];
       mix[1] = res.chs[1];
       const binHz = sr / spec.N;
-      const pts = bandCenters(3, 31.5, 16000).map((f) => ({ freq: Math.round(f), db: curve[Math.min(curve.length - 1, Math.round(f / binHz))] }));
+      const pts = bandCenters(3, 31.5, 16000).map((f) => ({ freq: Math.round(f), db: roughCurve[Math.min(roughCurve.length - 1, Math.round(f / binHz))] }));
       roughTone = { strength: s.roughTone, curve: pts };
       const big = [...pts].sort((a, b) => Math.abs(b.db) - Math.abs(a.db)).slice(0, 3);
       log.push(`Tone moved ${Math.round(s.roughTone * 100)}% toward your rough mix (at most 4 dB). Largest moves: ${big.map((p) => `${fmt(p.db)} dB at ${p.freq} Hz`).join(', ')}.`);
@@ -385,6 +559,35 @@ export class MixSession {
       outGain = (s.headroom ?? -6) - tp;
       gain(mix, outGain);
       log.push(`Output: normalised so true peak sits at ${s.headroom ?? -6} dBTP, leaving headroom for mastering (${fmt(outGain)} dB).`);
+    }
+
+    // --- Alternate mixes: same buses and effects, different balances ---
+    let alternates = null;
+    if (split) {
+      const versions = [
+        { key: 'vocal_up_1db', label: 'Vocal up 1 dB', g: { vocals: 1 }, vr: 1 },
+        { key: 'vocal_up_2db', label: 'Vocal up 2 dB', g: { vocals: 2 }, vr: 2 },
+        { key: 'bass_up_1db', label: 'Bass up 1 dB', g: { bass: 1 } },
+        { key: 'instrumental', label: 'Instrumental', g: { vocals: -Infinity }, vr: -Infinity, need: 'vocals' },
+        { key: 'a_cappella', label: 'A cappella', g: { drums: -Infinity, bass: -Infinity, music: -Infinity, fx: -Infinity }, or: -Infinity, need: 'vocals' },
+        { key: 'clean_bus', label: 'No mix-bus processing', clean: true },
+      ].filter((v) => !v.need || used[v.need]).filter((v) => v.key !== 'bass_up_1db' || used.bass);
+      alternates = [];
+      versions.forEach((v, i) => {
+        progress(`Alternate mix: ${v.label}`, 0.8 + (0.04 * i) / versions.length);
+        const m = sumMix(v.g, v.vr ?? 0, v.or ?? 0);
+        if (!v.clean) busChain(m, true);
+        let chs = m, lufs, dbtp;
+        if (s.outputMode === 'loudness') {
+          const f = finalize(m, sr, { targetLufs: s.targetLufs ?? -14, ceiling: s.ceiling ?? -1 });
+          chs = f.chs; lufs = f.achievedLufs; dbtp = f.truePeakDbtp;
+        } else {
+          gain(m, outGain);
+          lufs = integratedLufs(m, sr); dbtp = truePeak(m, sr).dbtp;
+        }
+        alternates.push({ key: v.key, label: v.label, chs, lufs, dbtp });
+      });
+      log.push(`Alternate mixes: ${alternates.map((a) => a.label.toLowerCase()).join(', ')}.`);
     }
 
     // Unprocessed sum for the A/B comparison, peak-matched to the same ceiling.
@@ -439,6 +642,7 @@ export class MixSession {
       rawSum: this.rawSum,
       busStems,
       spatial,
+      alternates,
       report: {
         settings: s,
         sampleRate: sr,
@@ -456,6 +660,8 @@ export class MixSession {
         busSpectra: { centers, levels: busSpectra },
         pocket,
         sections,
+        tempo,
+        alternates: alternates ? alternates.map(({ chs, ...a }) => a) : null,
         rough: this.rough ? { lufs: this.rough.lufs, seconds: this.rough.seconds, fit: rough ? { errDb: rough.errDb, lagSec: rough.lagSec, rejected: !!rough.rejected, gains: rough.gains || null } : null, tone: roughTone } : null,
         spatial: spatial ? { layout: spatial.layout, lufs: spatial.lufs, dbtp: spatial.dbtp, maxGr: spatial.maxGr, levels: spatial.levels } : null,
       },
@@ -512,7 +718,7 @@ export class MixSession {
     return { targetDiff: target, minDb, maxDb, curve: sm, stepSec: 0.1 };
   }
 
-  duckUnderVocals(music, vocals, amountDb, releaseMs) {
+  duckUnderVocals(music, vocals, amountDb, releaseMs, { lo = 250, hi = 5000, hiShare = 0.5 } = {}) {
     const sr = this.sr, n = this.n;
     const env = envDb(vocals, sr, 10, 80);
     const vocI = integratedLufs(vocals, sr);
@@ -523,11 +729,11 @@ export class MixSession {
     }
     const g = smoothGain(target, sr, 12, releaseMs);
     for (let c = 0; c < 2; c++) {
-      const [lo, mid, hi] = lr4Split3(music[c], 250, 5000, sr);
+      const [l, mid, h] = lr4Split3(music[c], lo, hi, sr);
       const ch = music[c];
       for (let i = 0; i < n; i++) {
         const lin = Math.pow(10, g[i] / 20);
-        ch[i] = lo[i] + mid[i] * lin + hi[i] * Math.sqrt(lin);
+        ch[i] = l[i] + mid[i] * lin + h[i] * (hiShare ? Math.pow(lin, hiShare) : 1);
       }
     }
     const st = stats(g);
@@ -546,7 +752,11 @@ export class MixSession {
     const target = new Float32Array(n);
     for (let i = 0; i < n; i++) target[i] = -amountDb * Math.max(0, Math.min(1, (env[i] - (p90 - 12)) / 12));
     const g = smoothGain(target, sr, 2, 90);
-    for (const ch of bass) for (let i = 0; i < n; i++) ch[i] *= Math.pow(10, g[i] / 20);
+    // Only the bass's low band (where the kick lives) ducks fully; its upper notes barely move.
+    for (const ch of bass) {
+      const [low, high] = lr4Split2(ch, 150, sr);
+      for (let i = 0; i < n; i++) { const lin = Math.pow(10, g[i] / 20); ch[i] = low[i] * lin + high[i] * Math.pow(lin, 0.25); }
+    }
     return stats(g);
   }
 }

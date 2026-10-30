@@ -3,8 +3,8 @@
 
 import { analyze } from './analyze.js';
 import { integratedLufs, truePeak, measureLoudness } from './loudness.js';
-import { compress, multiband, deess, limitWithEnvelope, peakEnvelope, attackSustain, bassDebloom, sectionDynamics, deBox, hfPeakReserve } from './dynamics.js';
-import { saturate, tapeHiss, reverb, addInto, multibandWidth, toneEq, gain, copyChannels } from './effects.js';
+import { compress, multiband, deess, limitWithEnvelope, peakEnvelope, attackSustain, bassDebloom, sectionDynamics, deBox, hfPeakReserve, dynamicShelf } from './dynamics.js';
+import { saturate, tapeHiss, reverb, addInto, exciter, multibandWidth, toneEq, gain, copyChannels } from './effects.js';
 import { ltas, referenceCurve, spectralProcess, bandCenters, bandLevels } from './spectral.js';
 import { dcBlock, design, cascade } from './filters.js';
 import {
@@ -25,7 +25,7 @@ export const MASTER_DEFAULTS = {
   // Repair (opt-in restoration)
   delayRepair: false, declip: false, clickRepair: 0, hum: 0, denoise: 0, bandBalance: false, bandwidthGuard: true,
   // Extra dynamics
-  attack: 0, sustain: 0, bassDebloom: 0, sectionDyn: 0, sectionWindow: 10, deBox: 0, deBoxFreq: 0, hfReserve: 0, hiss: 0, verb: 0,
+  attack: 0, sustain: 0, bassDebloom: 0, sectionDyn: 0, sectionWindow: 10, deBox: 0, deBoxFreq: 0, hfReserve: 0, hiss: 0, verb: 0, harshCut: 0, harshFreq: 3000, nasalCut: 0, nasalFreq: 700, exciter: 0,
   // 1 = process at the source rate, 2 = run the chain at twice the rate
   oversample: 1,
   // Sound profile
@@ -75,15 +75,29 @@ export function finalize(chs, sr, { targetLufs, ceiling, lookahead = 5, release 
   let gainDb = clampGain(targetLufs - pre);
   const out = chs.map((c) => new Float32Array(c.length));
   let lim = null, achieved = pre, iterations = 0;
-  for (let it = 0; it < 5; it++) {
-    iterations++;
-    lim = limitWithEnvelope(chs, sr, env, { gainDb, ceilingDb: ceiling - 0.05, lookaheadMs: lookahead, releaseMs: release, out });
-    achieved = integratedLufs(out, sr, weights);
-    const err = targetLufs - achieved;
-    if (Math.abs(err) < 0.05) break;
-    gainDb = clampGain(gainDb + err * (lim.maxGr > 3 ? 1.3 : 1));
+  // Secant search: the loudness gained per dB of gain shrinks as the limiter works harder.
+  const search = (ceil) => {
+    let prevGain = null, prevAch = null;
+    for (let it = 0; it < 8; it++) {
+      iterations++;
+      lim = limitWithEnvelope(chs, sr, env, { gainDb, ceilingDb: ceil, lookaheadMs: lookahead, releaseMs: release, out });
+      achieved = integratedLufs(out, sr, weights);
+      const err = targetLufs - achieved;
+      if (Math.abs(err) < 0.05) break;
+      let slope = lim.maxGr > 3 ? 0.77 : 1;
+      if (prevGain != null && Math.abs(gainDb - prevGain) > 0.01) slope = Math.max(0.15, Math.min(1, (achieved - prevAch) / (gainDb - prevGain)));
+      prevGain = gainDb; prevAch = achieved;
+      gainDb = clampGain(gainDb + err / slope);
+    }
+  };
+  search(ceiling - 0.05);
+  let tp = truePeak(out, sr);
+  // Very sharp transients can peak a little above the limiter's estimate; if so,
+  // search again with the ceiling lowered by that overshoot instead of turning everything down.
+  if (tp.dbtp > ceiling + 0.05) {
+    search(ceiling - 0.05 - (tp.dbtp - ceiling));
+    tp = truePeak(out, sr);
   }
-  const tp = truePeak(out, sr);
   let safety = 0;
   if (tp.dbtp > ceiling) {
     safety = ceiling - tp.dbtp - 0.02;
@@ -184,18 +198,29 @@ function processChain(input, sr, s, { profile, progress, inputAnalysis }) {
     log('Bandwidth guard', `Source content ends near ${(bw.bandwidthHz / 1000).toFixed(1)} kHz, so the 12 kHz air shelf was skipped.`);
   }
   const tilt = s.tilt + (s.tiltTrim || 0);
+  // Cuts are narrow, boosts wide (the mid bell's width follows its sign).
   const extra = [];
-  if (s.deMud > 0) extra.push({ type: 'peaking', freq: s.deMudFreq || 300, q: 1.0, gain: -3 * s.deMud });
-  toneEq(chs, sr, { hpf: s.hpf, low: s.low, mid: s.mid, high: s.high, tilt, air, extra });
+  if (s.deMud > 0) extra.push({ type: 'peaking', freq: s.deMudFreq || 300, q: 1.4, gain: -3 * s.deMud });
+  if (s.nasalCut > 0) extra.push({ type: 'peaking', freq: s.nasalFreq || 700, q: 3, gain: -s.nasalCut });
+  if (s.harshCut > 0) extra.push({ type: 'peaking', freq: s.harshFreq || 3000, q: 3, gain: -s.harshCut });
+  // Treble and air boosts are dynamic (below); cuts stay static.
+  toneEq(chs, sr, { hpf: s.hpf, low: s.low, mid: s.mid, midQ: s.mid > 0 ? 0.7 : 1.4, high: Math.min(0, s.high), tilt, air: 0, extra });
+  const shine = [];
+  if (s.high > 0) shine.push(dynamicShelf(chs, sr, { freq: 7000, gainDb: s.high }));
+  if (air > 0) shine.push(dynamicShelf(chs, sr, { freq: Math.min(12000, sr * 0.4), gainDb: air }));
   log('Tone EQ', [
     s.hpf ? `High-pass ${s.hpf} Hz` : 'No high-pass',
     s.low ? `low shelf ${fmt(s.low)} dB` : null,
-    s.mid ? `mid ${fmt(s.mid)} dB` : null,
-    s.high ? `high shelf ${fmt(s.high)} dB` : null,
+    s.mid ? `mid ${fmt(s.mid)} dB (${s.mid > 0 ? 'wide boost' : 'narrower cut'})` : null,
+    s.high < 0 ? `high shelf ${fmt(s.high)} dB` : null,
     tilt ? `tilt ${fmt(tilt)} dB${s.tiltTrim ? ` (incl. ${fmt(s.tiltTrim)} dB release cohesion)` : ''}` : null,
-    air ? `air ${fmt(air)} dB` : null,
     s.deMud ? `low-mid cut ${fmt(-3 * s.deMud)} dB at ${s.deMudFreq} Hz` : null,
+    s.nasalCut ? `narrow ${fmt(-s.nasalCut)} dB cut at ${s.nasalFreq} Hz (boxy, nasal)` : null,
+    s.harshCut ? `narrow ${fmt(-s.harshCut)} dB cut at ${s.harshFreq} Hz (harsh)` : null,
   ].filter(Boolean).join(', ') + '.');
+  for (const d of shine.filter(Boolean)) {
+    log('Dynamic shine', `${fmt(d.gainDb)} dB shelf above ${d.freq >= 1000 ? `${(d.freq / 1000).toFixed(d.freq % 1000 ? 1 : 0)} kHz` : `${d.freq} Hz`}: ${fmt(d.minDb)} dB always, the rest backing off while cymbals, snares or sibilance are already loud (average ${fmt(d.avgDb)} dB).`, { curve: d.curve });
+  }
 
   let refInfo = null;
   let staticCurve = null;
@@ -204,7 +229,10 @@ function processChain(input, sr, s, { profile, progress, inputAnalysis }) {
     progress('Matching the sound profile', 0.36);
     const srcSpec = ltas(chs, sr);
     const refSpec = profileSpectrum(profile, srcSpec.N, sr);
-    staticCurve = referenceCurve(srcSpec, refSpec, { strength: s.refStrength });
+    // Kept within ±4 dB: a bigger difference is better fixed in the mix.
+    const wide = referenceCurve(srcSpec, refSpec, { strength: s.refStrength, maxDb: 12 });
+    staticCurve = referenceCurve(srcSpec, refSpec, { strength: s.refStrength, maxDb: 4 });
+    const wantMax = Math.max(...Array.from(wide, Math.abs));
     const binHz = sr / srcSpec.N;
     if (guard) {
       const kb = Math.floor((bw.bandwidthHz * 0.95) / binHz);
@@ -221,7 +249,7 @@ function processChain(input, sr, s, { profile, progress, inputAnalysis }) {
     };
     const biggest = [...curvePts].sort((a, b) => Math.abs(b.db) - Math.abs(a.db)).slice(0, 3);
     const label = profile.name ? `sound profile “${profile.name}”` : profile.count > 1 ? `the average of ${profile.count} references` : 'the reference';
-    log('Reference match', `Tonal balance moved ${Math.round(s.refStrength * 100)}% toward ${label}. Largest moves: ${biggest.map((p) => `${fmt(p.db)} dB at ${p.freq} Hz`).join(', ')}.${guard ? ` Boosts above ${(bw.bandwidthHz / 1000).toFixed(1)} kHz were removed by the bandwidth guard.` : ''}`, { curve: curvePts });
+    log('Reference match', `Tonal balance moved ${Math.round(s.refStrength * 100)}% toward ${label}. Largest moves: ${biggest.map((p) => `${fmt(p.db)} dB at ${p.freq} Hz`).join(', ')}.${wantMax > 4.5 ? ` Matching fully would take up to ${wantMax.toFixed(1)} dB; the master stops at 4 dB, as a bigger change sounds better made in the mix.` : ''}${guard ? ` Boosts above ${(bw.bandwidthHz / 1000).toFixed(1)} kHz were removed by the bandwidth guard.` : ''}`, { curve: curvePts });
   }
 
   let resonanceReport = null;
@@ -308,6 +336,11 @@ function processChain(input, sr, s, { profile, progress, inputAnalysis }) {
   if (s.saturation > 0) {
     saturate(chs, sr, { drive: s.saturation, mode: s.satMode });
     log('Saturation', `${s.satMode} saturation at ${s.saturation.toFixed(1)} dB drive, 2x oversampled.`);
+  }
+  if (s.exciter > 0.005) {
+    progress('Exciter', 0.76);
+    exciter(chs, sr, { amount: s.exciter });
+    log('Exciter', `Fresh harmonics added above 3.5 kHz only (${Math.round(s.exciter * 100)}%), more in quiet passages and less in loud ones. The lows and mids are untouched.`);
   }
 
   progress('Stereo image', 0.78);
@@ -405,10 +438,10 @@ export function master(audio, settings, { references = [], profile = null, deliv
   const fin = finalizeOut(chain.chs, s, finCache);
   chain.stages.push({
     stage: 'Loudness + limiter',
-    detail: `Gain ${fmt(fin.gainDb)} dB into a true-peak limiter (ceiling ${s.ceiling} dBTP, ${s.lookahead} ms look-ahead, ${s.release} ms release). Reached ${fin.achievedLufs.toFixed(2)} LUFS at ${fin.truePeakDbtp.toFixed(2)} dBTP in ${fin.iterations} pass(es). Limiter: avg ${fin.limiter.avgGr.toFixed(2)} dB, max ${fin.limiter.maxGr.toFixed(1)} dB, active ${fin.limiter.activePct.toFixed(1)}% of the time.${os === 2 ? ` After converting back to ${(sr / 1000).toFixed(1)} kHz, a final pass caught up to ${fin.convertGrDb.toFixed(2)} dB of conversion overshoot.` : ''}`,
+    detail: `Gain ${fmt(fin.gainDb)} dB into a true-peak limiter (ceiling ${s.ceiling} dBTP, ${s.lookahead} ms look-ahead, ${s.release} ms release that adapts: quicker after short peaks, slower when limiting is held). Reached ${fin.achievedLufs.toFixed(2)} LUFS at ${fin.truePeakDbtp.toFixed(2)} dBTP in ${fin.iterations} pass(es). Limiter: avg ${fin.limiter.avgGr.toFixed(2)} dB, max ${fin.limiter.maxGr.toFixed(1)} dB, active ${fin.limiter.activePct.toFixed(1)}% of the time.${os === 2 ? ` After converting back to ${(sr / 1000).toFixed(1)} kHz, a final pass caught up to ${fin.convertGrDb.toFixed(2)} dB of conversion overshoot.` : ''}`,
   });
   const warnings = [];
-  if (fin.limiter.maxGr > 8) warnings.push(`The limiter needed up to ${fin.limiter.maxGr.toFixed(1)} dB of reduction to reach ${s.targetLufs} LUFS. Expect audible pumping or flattened transients; a lower target or more multiband compression will sound cleaner.`);
+  if (fin.limiter.maxGr > 8 || fin.limiter.avgGr > 2) warnings.push(`The limiter is working hard to reach ${s.targetLufs} LUFS (up to ${fin.limiter.maxGr.toFixed(1)} dB, ${fin.limiter.avgGr.toFixed(1)} dB on average; 1-3 dB is the comfortable range). Hits may sound flattened. A slightly lower loudness target will keep more punch and feeling.`);
   if (Math.abs(fin.achievedLufs - s.targetLufs) > 0.5) warnings.push(`Target ${s.targetLufs} LUFS could not be reached exactly (got ${fin.achievedLufs.toFixed(2)} LUFS).`);
 
   progress('Analysing the master', 0.88);
@@ -444,6 +477,8 @@ export function master(audio, settings, { references = [], profile = null, deliv
     progress('Delivery: vinyl pre-master', 0.98);
     const vs = { ...s, ...vinylOverrides(s) };
     const c = processChain(work, wsr, vs, { profile, progress: () => {}, inputAnalysis: chainAnalysis });
+    // Vinyl wants its transients: pick the loudness that needs at most about 1 dB of limiting.
+    vs.targetLufs = Math.min(vs.targetLufs, integratedLufs(c.chs, wsr) + (vs.ceiling + 1 - truePeak(c.chs, wsr).dbtp));
     const f = finalizeOut(c.chs, vs);
     extras.push({ kind: 'vinyl', key: 'vinyl', label: 'Vinyl / cassette pre-master', chs: f.chs, lufs: f.achievedLufs, dbtp: f.truePeakDbtp, maxGr: f.limiter.maxGr });
   }

@@ -20,7 +20,7 @@ export const MASTER_DEFAULTS = {
   hpf: 25, low: 0, mid: 0, high: 0, tilt: 0, air: 0, deMud: 0, deMudFreq: 300,
   refStrength: 0.7, profileWidth: 0.5, profileLoudness: false, resonance: 0.3, deess: 0.15,
   multiband: 0.35, xLow: 120, xHigh: 2500, glue: 0.28,
-  attack: 0, sustain: 0, bassDebloom: 0, sectionDyn: 0, sectionWindow: 10, deBox: 0, deBoxFreq: 140, hfReserve: 0, oversample: 1, hiss: 0, verb: 0,
+  attack: 0, sustain: 0, bassDebloom: 0, sectionDyn: 0, sectionWindow: 10, deBox: 0, deBoxFreq: 140, hfReserve: 0, oversample: 1, hiss: 0, verb: 0, harshCut: 0, harshFreq: 3000, nasalCut: 0, nasalFreq: 700, exciter: 0,
   saturation: 0, satMode: 'tape',
   widthLow: 1, widthMid: 1, widthHigh: 1, monoBass: 0, balanceRepair: true,
   delayRepair: false, declip: false, clickRepair: 0, hum: 0, denoise: 0, bandBalance: false, bandwidthGuard: true,
@@ -77,6 +77,10 @@ const SCHEMA = [
     { key: 'air', label: 'Air (12 kHz)', type: 'range', min: 0, max: 4, step: 0.5, unit: ' dB', zeroLabel: 'Off', help: 'A gentle lift at the very top for sparkle.' },
     { key: 'deMud', label: 'Clear muddiness', type: 'range', min: 0, max: 1, step: 0.05, format: (v) => (v ? `${(-3 * v).toFixed(1)} dB` : 'Off'), help: 'A broad cut where mixes turn cloudy.' },
     { key: 'deMudFreq', label: 'Muddiness point', type: 'range', min: 150, max: 600, step: 10, unit: ' Hz', help: 'Where that cut sits.' },
+    { key: 'nasalCut', label: 'Tame nasal tone', type: 'range', min: 0, max: 3, step: 0.5, format: (v) => (v ? `-${v} dB` : 'Off'), help: 'A narrow cut where the mix sounds boxy or nasal.' },
+    { key: 'nasalFreq', label: 'Nasal point', type: 'range', min: 500, max: 1200, step: 10, unit: ' Hz' },
+    { key: 'harshCut', label: 'Tame harshness', type: 'range', min: 0, max: 3, step: 0.5, format: (v) => (v ? `-${v} dB` : 'Off'), help: 'A narrow cut where the upper mids sound harsh.' },
+    { key: 'harshFreq', label: 'Harshness point', type: 'range', min: 2000, max: 6000, step: 50, unit: ' Hz' },
   ] },
   { title: 'Dynamics', items: [
     { key: 'multiband', label: 'Even out lows, mids and highs', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'Keeps lows, mids and highs from jumping out.' },
@@ -95,6 +99,7 @@ const SCHEMA = [
   ] },
   { title: 'Character', items: [
     { key: 'verb', label: 'Reverb', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'A touch of room on the whole song. The bass stays dry.' },
+    { key: 'exciter', label: 'Sparkle (exciter)', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'Adds fresh harmonics to the top end only, more in quiet parts.' },
     { key: 'saturation', label: 'Warmth', type: 'range', min: 0, max: 12, step: 0.5, unit: ' dB', zeroLabel: 'Off', help: 'Gentle grit that makes the sound warmer and fuller.' },
     { key: 'satMode', label: 'Warmth type', type: 'select', options: [{ value: 'tape', label: 'Tape (smooth)' }, { value: 'tube', label: 'Tube (rich, adds body)' }, { value: 'clip', label: 'Soft clip (loud, mostly clean)' }] },
     { key: 'hiss', label: 'Vintage tape hiss', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'Faint tape noise underneath, heard mostly in quiet parts.' },
@@ -661,7 +666,7 @@ export function initMaster({ engine, onMode }) {
     const masterLoud = loudnessOf(0, 0, rep.output);
     const lo = { lufs: rep.output.loudness.integrated, dbtp: rep.output.peak.truePeakDbtp };
     const masterFile = () => encode(r.master, `${r.base}_master.${ext}`, { loudness: masterLoud, kind: 'master' });
-    const mp3File = async () => { const m = await encodeMp3(finish(r.master), { meta }); return { name: `${r.base}.mp3`, data: m.data, kbps: m.kbps }; };
+    const mp3File = async () => { const m = await encodeMp3(finish(r.master), { meta, peakDbtp: rep.output.peak.truePeakDbtp }); return { name: `${r.base}.mp3`, data: m.data, kbps: m.kbps }; };
     const cdFile = () => encode(r.master, `${r.base}_CD_16bit_44k1.wav`, { format: 'wav', bits: 16, dither: 'shaped', outputRate: 44100, loudness: masterLoud, kind: 'CD master' });
     const altFile = () => (ext === 'wav'
       ? encode(r.master, `${r.base}_master_24bit.flac`, { format: 'flac', bits: 24, loudness: masterLoud })

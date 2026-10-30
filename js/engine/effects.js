@@ -2,8 +2,8 @@
 // (including per-band width and mono bass), panning, a Schroeder-Moorer style
 // reverb, and a filtered feedback delay.
 
-import { design, biquad, lr4, cascade, lr4Split3 } from './filters.js';
-import { integratedLufs } from './loudness.js';
+import { design, biquad, lr4, cascade, lr4Split3, zeroPhaseLowpass } from './filters.js';
+import { integratedLufs, hopEnergies } from './loudness.js';
 
 // ---- 2x oversampling with a windowed-sinc half-band filter ----
 const HB_TAPS = 31;
@@ -117,6 +117,75 @@ export function tapeHiss(chs, sr, { amount = 0, seed = 0x9e3779b9 } = {}) {
   const g = Math.pow(10, (program + relLu - integratedLufs(noise, sr)) / 20);
   chs.forEach((ch, c) => { const x = noise[c]; for (let i = 0; i < n; i++) ch[i] += x[i] * g; });
   return { relLu, programLufs: program };
+}
+
+/**
+ * Upper-band harmonic exciter. Only the band above `freq` is driven (2x
+ * oversampled, mostly even harmonics), and only the new harmonics above `freq`
+ * are added back, so the low end and mids are untouched. With `dynamic`, quiet
+ * passages get more and loud, full ones less.
+ */
+export function exciter(chs, sr, { amount = 0, freq = 3500, dynamic = true } = {}) {
+  if (amount <= 0.005) return null;
+  const n = chs[0].length;
+  const bands = chs.map((ch) => { const lp = zeroPhaseLowpass(ch, freq, sr); const h = new Float32Array(n); for (let i = 0; i < n; i++) h[i] = ch[i] - lp[i]; return h; });
+  // Drive so the band's loud moments reach the bend of the curve.
+  const sorted = Float32Array.from(bands[0].filter((_, i) => i % 7 === 0), Math.abs).sort();
+  const ref = sorted[Math.floor(sorted.length * 0.995)] || 1e-6;
+  const drive = 1.6 / ref;
+  const bias = 0.25, tb = Math.tanh(bias), slope = 1 - tb * tb;
+  const products = bands.map((h) => {
+    const up = upsample2(h);
+    for (let i = 0; i < up.length; i++) { const x = up[i] * drive; up[i] = ((Math.tanh(x + bias) - tb) / slope - x) / drive; }
+    const p = downsample2(up, new Float32Array(n));
+    const lp = zeroPhaseLowpass(p, freq, sr);
+    for (let i = 0; i < n; i++) p[i] -= lp[i];
+    return p;
+  });
+  // Level over time (400 ms): more on quiet passages, less on loud ones.
+  const w = new Float32Array(n).fill(1);
+  if (dynamic) {
+    const { energy, hop } = hopEnergies(chs, sr, 0.1);
+    const db = Array.from(energy, (e) => 10 * Math.log10(e / hop + 1e-12));
+    const med = [...db].sort((a, b) => a - b)[Math.floor(db.length * 0.6)];
+    for (let i = 0; i < n; i++) {
+      const j = Math.min(db.length - 1, (i / hop) | 0);
+      w[i] = Math.max(0.5, Math.min(1.4, 1 - (db[j] - med) / 12));
+    }
+    // Smooth the weight so it never steps.
+    const a = Math.exp(-1 / (0.2 * sr));
+    let m = w[0];
+    for (let i = 0; i < n; i++) { m = a * m + (1 - a) * w[i]; w[i] = m; }
+  }
+  const g = 1.2 * amount;
+  chs.forEach((ch, c) => { const p = products[c]; for (let i = 0; i < n; i++) ch[i] += p[i] * g * w[i]; });
+  return { amount, freq };
+}
+
+/**
+ * Subtle chorus: two slowly modulated delay taps (15-25 ms) mixed in at a low
+ * level, with the left and right taps moving in opposite phase for a little
+ * movement around the centre.
+ */
+export function chorus(chs, sr, { mix = 0.06, rateHz = 0.6, delayMs = 18, depthMs = 3 } = {}) {
+  if (mix <= 0.001) return null;
+  const n = chs[0].length;
+  const base = (delayMs * sr) / 1000, depth = (depthMs * sr) / 1000;
+  const w = (2 * Math.PI * rateHz) / sr;
+  const mono = new Float32Array(n);
+  for (let i = 0; i < n; i++) mono[i] = 0.5 * (chs[0][i] + chs[chs.length - 1][i]);
+  chs.forEach((ch, c) => {
+    const ph = c === 0 ? 0 : Math.PI;
+    for (let i = n - 1; i >= 0; i--) {
+      const d = base + depth * Math.sin(w * i + ph);
+      const pos = i - d;
+      const k = Math.floor(pos);
+      if (k < 0) continue;
+      const t = pos - k;
+      ch[i] += mix * (mono[k] * (1 - t) + mono[Math.min(n - 1, k + 1)] * t);
+    }
+  });
+  return { mix };
 }
 
 export function gain(chs, db) {

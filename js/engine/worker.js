@@ -69,7 +69,7 @@ self.onmessage = (ev) => {
       if (!session) throw new Error('No mix session is open.');
       const res = session.finish(progress);
       session = null;
-      const transfers = [...buffersOf(res.channels), ...buffersOf(res.rawSum), ...Object.values(res.busStems || {}).flatMap(buffersOf), ...buffersOf(res.spatial?.chs)];
+      const transfers = [...buffersOf(res.channels), ...buffersOf(res.rawSum), ...Object.values(res.busStems || {}).flatMap(buffersOf), ...buffersOf(res.spatial?.chs), ...(res.alternates || []).flatMap((a) => buffersOf(a.chs))];
       self.postMessage({ id, type: 'result', data: res }, transfers);
     } else {
       throw new Error(`Unknown job type ${type}`);

@@ -23,7 +23,7 @@ const STEM_DEFAULTS = {
   vocals: { hpf: 80, comp: 0.5, compMode: 'smooth', deess: true, width: 1, monoBass: false, tune: 0, tuneSpeed: 40 },
   drums: { hpf: 30, comp: 0.45, compMode: 'punch', deess: false, width: 1, monoBass: true },
   bass: { hpf: 25, comp: 0.45, compMode: 'smooth', deess: false, width: 0.6, monoBass: true },
-  music: { hpf: 35, comp: 0.25, compMode: 'smooth', deess: false, width: 1, monoBass: true },
+  music: { hpf: 35, comp: 0.15, compMode: 'smooth', deess: false, width: 1, monoBass: true },
   fx: { hpf: 40, comp: 0.15, compMode: 'smooth', deess: false, width: 1, monoBass: false },
 };
 
@@ -45,6 +45,7 @@ export const MIX_DEFAULTS = {
   bitDepth: 24, dither: 'tpdf', outputRate: 0, renderBusStems: true,
   spatial: 'off', spatialCentre: 0.6, spatialLfe: -12,
   tuneKey: 'auto', sectionAuto: 0,
+  vocalChorus: 0.06, drumParallel: 0.3, drumDrive: 0.35, bassGrit: 0.3, delaySync: true, musicCleanup: true, alternates: false,
 };
 
 const STYLES = {
@@ -72,16 +73,21 @@ const SCHEMA = [
     { key: 'transientEnergy', label: 'Drum punch', type: 'range', min: 0, max: 1, step: 0.05, format: (v) => (Math.abs(v - 0.5) < 0.01 ? 'Neutral' : `${v > 0.5 ? '+' : '−'}${pct(Math.abs(v - 0.5) * 2)}`), help: 'Snappier drum hits, or softer below neutral.' },
     { key: 'bassTightness', label: 'Bass tightness', type: 'range', min: 0, max: 1, step: 0.05, format: pct, help: 'Evens out the bass so it sits tight with the kick.' },
     { key: 'bassDuck', label: 'Make room for the kick', type: 'range', min: 0, max: 8, step: 0.5, unit: ' dB', zeroLabel: 'Off', help: 'Dips the bass on each kick so both are heard.' },
+    { key: 'drumParallel', label: 'Drum weight', type: 'range', min: 0, max: 0.8, step: 0.05, format: offPct, help: 'Blends a hard-squashed copy of the drums underneath for weight, keeping the hits.' },
+    { key: 'drumDrive', label: 'Drum grit', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'A little tape saturation that helps the kit sit together.' },
+    { key: 'bassGrit', label: 'Bass on small speakers', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'Adds the bass notes’ upper harmonics, so the bass is heard on phones and laptops.' },
     { key: 'stereoWidth', label: 'Music width', type: 'range', min: 0, max: 1, step: 0.05, format: (v) => pct(0.6 + 0.8 * v), help: 'How wide the instruments spread left and right.' },
   ] },
   { title: 'Vocal space', items: [
     { key: 'duckAmount', label: 'Make room for the vocal', type: 'range', min: 0, max: 8, step: 0.5, unit: ' dB', zeroLabel: 'Off', help: 'Dips the music slightly while someone sings.' },
     { key: 'duckRelease', label: 'How fast the music comes back', type: 'range', min: 50, max: 600, step: 10, unit: ' ms', help: 'How quickly the music returns once the vocal stops.' },
+    { key: 'vocalChorus', label: 'Vocal shimmer', type: 'range', min: 0, max: 0.15, step: 0.01, format: offPct, help: 'A faint chorus on the lead vocal for movement. Keep it low.' },
   ] },
   { title: 'Mix tone', items: [
     { key: 'mixLow', label: 'Lows', type: 'range', min: -6, max: 6, step: 0.5, unit: ' dB', signed: true, help: 'Adds or removes weight across the whole mix.' },
     { key: 'mixHigh', label: 'Highs', type: 'range', min: -6, max: 6, step: 0.5, unit: ' dB', signed: true, help: 'Adds or removes brightness across the whole mix.' },
     { key: 'mixTape', label: 'Vintage tape', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'Warmth and a softer top end, like an old tape machine.' },
+    { key: 'musicCleanup', label: 'Clean up muddy instruments', type: 'toggle', help: 'Cuts muddy or boxy build-up in the instruments where it stands out.' },
   ] },
   { title: 'Pitch correction', items: [
     { key: 'tuneKey', label: 'Key', type: 'select', options: [
@@ -104,6 +110,7 @@ const SCHEMA = [
     { key: 'delayTime', label: 'Echo time', type: 'range', min: 60, max: 1000, step: 5, unit: ' ms' },
     { key: 'delayFeedback', label: 'Repeats', type: 'range', min: 0, max: 0.85, step: 0.01, format: pct, help: 'How long the echo keeps repeating.' },
     { key: 'delayPingpong', label: 'Bounce left and right', type: 'toggle' },
+    { key: 'delaySync', label: 'Lock echo to the tempo', type: 'toggle', help: 'Sets the echo time from the song’s beat instead of the time above.' },
     { key: 'delayLevel', label: 'Echo level', type: 'range', min: -30, max: 0, step: 0.5, unit: ' dB' },
   ] },
   { title: 'Finishing and files', items: [
@@ -116,6 +123,7 @@ const SCHEMA = [
     { key: 'dither', label: 'Dither', type: 'select', options: [{ value: 'tpdf', label: 'Standard' }, { value: 'shaped', label: 'Noise-shaped (best for 16-bit)' }, { value: 'none', label: 'None' }] },
     { key: 'outputRate', label: 'Sample rate', type: 'select', numeric: true, options: [{ value: 0, label: 'Same as the stems' }, { value: 44100, label: '44.1 kHz' }, { value: 48000, label: '48 kHz' }, { value: 96000, label: '96 kHz' }, { value: 192000, label: '192 kHz' }] },
     { key: 'renderBusStems', label: 'Also save each bus', type: 'toggle', help: 'Vocals, drums, bass, music and FX as separate files.' },
+    { key: 'alternates', label: 'Alternate mixes', type: 'toggle', help: 'Also makes vocal up 1 and 2 dB, bass up 1 dB, instrumental, a cappella and a version without mix-bus processing. Takes longer.' },
   ] },
   { title: 'Surround', items: [
     { key: 'spatial', label: 'Surround mix', type: 'select', options: [{ value: 'off', label: 'Off' }, { value: '5.1', label: '5.1 speakers' }, { value: '7.1.4', label: '7.1.4 speakers (with height)' }], help: 'A surround speaker version of the mix, plus a headphone version. Not a Dolby Atmos master.' },
@@ -146,7 +154,7 @@ function easyMixValues(e) {
       ...MIX_DEFAULTS,
       vocalLevel: q(4 * e.vocal, 0.5), vocalPresence: q(0.5 + 0.18 * e.clarity, 0.01),
       mixLow: q(2.5 * e.lows, 0.5), bassTightness: q(0.5 + 0.2 * Math.max(0, e.lows), 0.05), mixHigh: q(2 * e.highs, 0.5),
-      transientEnergy: q(0.5 + 0.6 * (e.punch - 0.5), 0.05), bassDuck: q(2 + 4 * (e.punch - 0.5), 0.5),
+      transientEnergy: q(0.5 + 0.6 * (e.punch - 0.5), 0.05), bassDuck: q(2 + 4 * (e.punch - 0.5), 0.5), drumParallel: q(0.15 + 0.3 * e.punch, 0.05),
       reverbEnabled: e.verb > 0.02, reverbLevel: q(-20 + 12 * e.verb, 0.5), reverbDecay: q(1 + 1.4 * e.verb, 0.1),
       delayEnabled: e.echo > 0.02, delayLevel: q(-26 + 12 * e.echo, 0.5), delayFeedback: q(0.2 + 0.25 * e.echo, 0.01),
       mixTape: e.tape,
@@ -165,6 +173,18 @@ export function inferCategory(name) {
   return 'music';
 }
 
+/** Drum stem type by name: kick, snare, cymbals (hats, overheads, rooms), toms, percussion or a full kit. */
+export function inferDrumRole(name) {
+  const n = name.toLowerCase();
+  const has = (re) => re.test(n);
+  if (has(/(^|[^a-z])(kick|kik|bd|bass ?drum)([^a-z]|$)/)) return 'kick';
+  if (has(/(^|[^a-z])(snare|snr|sd|clap|rim)([^a-z]|$)/)) return 'snare';
+  if (has(/(^|[^a-z])(hats?|hi-?hats?|hh|oh|overheads?|cymbals?|crash|ride|room|ambience|amb)([^a-z]|$)/)) return 'cymbals';
+  if (has(/(^|[^a-z])(toms?|floor ?tom|rack ?tom)([^a-z]|$)/)) return 'toms';
+  if (has(/(^|[^a-z])(perc|percussion|shaker|tamb|tambourine|conga|bongo|cowbell|timbale|guiro|claves|triangle)([^a-z]|$)/)) return 'perc';
+  return 'kit';
+}
+
 export function inferRole(name) {
   const n = name.toLowerCase();
   const isDouble = /(^|[^a-z0-9])(doubles?|dbls?|dubs?|stack)([^a-z0-9]|$)/.test(n);
@@ -179,6 +199,13 @@ export function inferRole(name) {
 }
 
 const rolePan = (role) => (role === 'double_left' ? -0.75 : role === 'double_right' ? 0.75 : 0);
+// Double-tracked parts named left/right (guitars, keys…) start panned wide to their side.
+const sidePan = (name) => {
+  const n = name.toLowerCase();
+  if (/(^|[^a-z0-9])(left|l|lft)([^a-z0-9]|$)/.test(n)) return -0.8;
+  if (/(^|[^a-z0-9])(right|r|rt|rgt)([^a-z0-9]|$)/.test(n)) return 0.8;
+  return 0;
+};
 
 const STATE_KEY = 'mixit.mix.v1';
 
@@ -251,7 +278,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
 
   // ---- Snapshots: style, controls, buses and per-stem settings (matched by file name) ----
   const SNAP_KEY = 'mixit.mix-snapshots.v1';
-  const STEM_KEYS = ['category', 'role', 'gain', 'pan', 'mute', 'solo', 'polarity', 'hpf', 'comp', 'compMode', 'deess', 'width', 'monoBass', 'eqLow', 'eqMid', 'eqHigh', 'panTouched', 'tune', 'tuneSpeed'];
+  const STEM_KEYS = ['category', 'role', 'drumRole', 'gain', 'pan', 'mute', 'solo', 'polarity', 'hpf', 'hpfAuto', 'comp', 'compMode', 'deess', 'width', 'monoBass', 'eqLow', 'eqMid', 'eqHigh', 'panTouched', 'tune', 'tuneSpeed'];
   function renderSnapshots() {
     const snaps = storage(SNAP_KEY, {});
     const list = $('x-snaps');
@@ -298,8 +325,8 @@ export function initMix({ engine, sendToMaster, onMode }) {
     const category = inferCategory(file.name);
     const role = category === 'vocals' ? inferRole(file.name) : 'lead';
     return {
-      id: crypto.randomUUID(), file, info: null, name: file.name, category, role,
-      gain: 0, pan: category === 'vocals' ? rolePan(role) : 0, mute: false, solo: false, polarity: false,
+      id: crypto.randomUUID(), file, info: null, name: file.name, category, role, drumRole: inferDrumRole(file.name), hpfAuto: true,
+      gain: 0, pan: category === 'vocals' ? rolePan(role) : sidePan(file.name), mute: false, solo: false, polarity: false,
       eqLow: 0, eqMid: 0, eqHigh: 0, open: false, panTouched: false,
       ...STEM_DEFAULTS[category],
     };
@@ -384,7 +411,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
       return el('label', { class: 'check' }, c, label);
     };
     const more = el('div', { class: 'stem-more' },
-      mini('High-pass', s.hpf, 0, 300, 5, (v) => (v ? `${v} Hz` : 'Off'), (v) => { s.hpf = v; }),
+      mini('High-pass', s.hpf, 0, 300, 5, (v) => (s.hpfAuto !== false ? `Auto ≥${v}` : v ? `${v} Hz` : 'Off'), (v) => { s.hpf = v; s.hpfAuto = false; }),
       mini('Compress', s.comp, 0, 1, 0.05, (v) => (v ? pct(v) : 'Off'), (v) => { s.comp = v; }),
       el('div', { class: 'mini' }, el('span', {}, 'Character'), mode),
       mini('Low 120', s.eqLow, -12, 12, 0.5, (v) => `${v > 0 ? '+' : ''}${v}`, (v) => { s.eqLow = v; }),
@@ -447,10 +474,12 @@ export function initMix({ engine, sendToMaster, onMode }) {
     return {
       stems: sessionStems.map((s) => ({
         name: s.name, category: s.category, role: s.category === 'vocals' ? s.role : '', gain: s.gain, pan: s.pan, mute: s.mute, solo: s.solo,
-        polarity: s.polarity, hpf: s.hpf, comp: s.comp, compMode: s.compMode, deess: s.deess, width: s.width, monoBass: s.monoBass,
+        polarity: s.polarity, hpf: s.hpf, hpfAuto: s.hpfAuto !== false, drumRole: s.category === 'drums' ? s.drumRole || inferDrumRole(s.name) : null,
+        comp: s.comp, compMode: s.compMode, deess: s.deess, width: s.width, monoBass: s.monoBass,
         eqLow: s.eqLow, eqMid: s.eqMid, eqHigh: s.eqHigh, tune: s.category === 'vocals' ? s.tune || 0 : 0, tuneSpeed: s.tuneSpeed ?? 40,
       })),
       tuneKey: v.tuneKey, sectionAuto: v.sectionAuto, mixLow: v.mixLow, mixHigh: v.mixHigh, mixTape: v.mixTape,
+      vocalChorus: v.vocalChorus, drumParallel: v.drumParallel, drumDrive: v.drumDrive, bassGrit: v.bassGrit, delaySync: v.delaySync, musicCleanup: v.musicCleanup, alternates: v.alternates,
       autoBalance: v.autoBalance, balanceAmount: v.balanceAmount, roughTone: v.roughTone, vocalLevel: v.vocalLevel, vocalPresence: v.vocalPresence, riderStrength: v.riderStrength, riderWindow: v.riderWindow,
       transientEnergy: v.transientEnergy, bassTightness: v.bassTightness, bassDuck: v.bassDuck, stereoWidth: v.stereoWidth,
       duckAmount: v.duckAmount, duckRelease: v.duckRelease, mixGlue: v.mixGlue,
@@ -547,7 +576,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
     const BUS_NAMES = Object.fromEntries(CATEGORIES);
     // Download all: the mix and each bus stem; in Advanced also the surround
     // files and data files.
-    const mixMp3 = async () => ({ name: 'mix.mp3', data: (await encodeMp3({ sr: r.sr, channels: r.channels }, { meta: { title: 'Mix' } })).data });
+    const mixMp3 = async () => ({ name: 'mix.mp3', data: (await encodeMp3({ sr: r.sr, channels: r.channels }, { meta: { title: 'Mix' }, peakDbtp: out.peak.truePeakDbtp })).data });
     const secs = r.channels[0].length / r.sr;
     const kbps = mp3Bitrate(secs);
     const packageFiles = async (full) => {
@@ -557,6 +586,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
         files.push(await wav(r.spatial.chs, `mix_spatial_${tag}.wav`, LAYOUTS[r.spatial.layout].mask));
         if (r.binaural) files.push(await wav(r.binaural.chs, `mix_binaural_${tag}.wav`));
       }
+      if (full) for (const a of r.alternates || []) files.push(await wav(a.chs, `alternates/mix_${a.key}.wav`));
       if (full) files.push({ name: 'mix_report.json', data: reportJson() }, { name: 'mix_loudness.csv', data: loudnessCsv([{ name: 'mix', analysis: out }]) });
       return files;
     };
@@ -570,6 +600,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
       items.push({ label: `Spatial ${r.spatial.layout} WAV`, sub: `${r.spatial.chs.length} channels · ${fx(r.spatial.lufs, 1)} LUFS`, run: async () => { const f = await wav(r.spatial.chs, `mix_spatial_${tag}.wav`, LAYOUTS[r.spatial.layout].mask); download(f.data, f.name, 'audio/wav'); } });
       if (r.binaural) items.push({ label: `Binaural ${r.spatial.layout} WAV`, sub: `headphones · ${fx(r.binaural.lufs, 1)} LUFS`, run: async () => { const f = await wav(r.binaural.chs, `mix_binaural_${tag}.wav`); download(f.data, f.name, 'audio/wav'); } });
     }
+    for (const a of r.alternates || []) items.push({ label: `${a.label} WAV`, sub: `alternate mix · ${fx(a.lufs, 1)} LUFS`, run: async () => { const f = await wav(a.chs, `mix_${a.key}.wav`); download(f.data, f.name, 'audio/wav'); } });
     items.push(
       { label: 'Report (JSON)', sub: 'stems, buses, chain, measurements', run: async () => download(reportJson(), 'mix_report.json', 'application/json') },
       { label: 'Loudness timeline (CSV)', sub: '100 ms resolution', run: async () => download(loudnessCsv([{ name: 'mix', analysis: out }]), 'mix_loudness.csv', 'text/csv') },
@@ -619,7 +650,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
         el('td', { class: 'num' }, `${sx(b.userGainDb, 1)} dB`),
         el('td', { class: 'num' }, `${fx(b.outputLufs, 1)} LUFS`),
         el('td', { class: 'num' }, b.glue ? `${fx(b.glue.avgGr, 1)} dB avg` : '–'),
-        el('td', { style: 'text-align:left;white-space:normal;color:var(--muted);font-size:12px' }, [b.presence, b.tightness, b.transient ? `transients ${sx(b.transient.maxChangeDb, 1)} dB peak` : null, b.width ? `width ${pct(b.width)}` : null].filter(Boolean).join(' · ')))))))));
+        el('td', { style: 'text-align:left;white-space:normal;color:var(--muted);font-size:12px' }, [b.presence, b.tightness, b.grit, b.parallel, b.drive, b.cleanup ? `cleanup ${b.cleanup}` : null, b.transient ? `transients ${sx(b.transient.maxChangeDb, 1)} dB peak` : null, b.width ? `width ${pct(b.width)}` : null].filter(Boolean).join(' · ')))))))));
 
     if (rep.sections) root.append(sectionsPanel(rep.sections));
     const tuned = rep.stems.filter((s) => s.tune?.applied);

@@ -106,14 +106,16 @@ export function detectSections(chs, sr, { minSec = 8, minNovelty = 1.5 } = {}) {
   return secs;
 }
 
-// Automatic moves per label, scaled by the amount (dB per bus, music width factor, vocal send factor).
+// Automatic moves per label, scaled by the amount (dB per bus, music width
+// factor, vocal send factor, and low/high shelves in dB on the music and FX:
+// verses carry a little less low and high end, choruses are full range).
 const AUTO = {
-  'Hook / drop': { vocals: 0.5, drums: 0.75, bass: 0.25, music: 1, fx: 0.5, width: 0.15, send: 0.2 },
-  Verse: { vocals: 0, drums: 0, bass: 0, music: -0.75, fx: -0.5, width: -0.1, send: -0.3 },
-  Break: { vocals: 0, drums: -0.5, bass: 0, music: 0.5, fx: 0.5, width: 0.1, send: 0.2 },
-  Intro: { vocals: 0, drums: 0, bass: 0, music: 0, fx: 0, width: 0, send: 0 },
-  Outro: { vocals: 0, drums: 0, bass: 0, music: 0, fx: 0, width: 0, send: 0 },
-  'Whole song': { vocals: 0, drums: 0, bass: 0, music: 0, fx: 0, width: 0, send: 0 },
+  'Hook / drop': { vocals: 0.5, drums: 0.75, bass: 0.25, music: 1, fx: 0.5, width: 0.15, send: 0.2, lows: 0, highs: 0 },
+  Verse: { vocals: 0, drums: 0, bass: 0, music: -0.75, fx: -0.5, width: -0.1, send: -0.3, lows: -1, highs: -1 },
+  Break: { vocals: 0, drums: -0.5, bass: 0, music: 0.5, fx: 0.5, width: 0.1, send: 0.2, lows: -1.5, highs: 0 },
+  Intro: { vocals: 0, drums: 0, bass: 0, music: 0, fx: 0, width: 0, send: 0, lows: 0, highs: 0 },
+  Outro: { vocals: 0, drums: 0, bass: 0, music: 0, fx: 0, width: 0, send: 0, lows: 0, highs: 0 },
+  'Whole song': { vocals: 0, drums: 0, bass: 0, music: 0, fx: 0, width: 0, send: 0, lows: 0, highs: 0 },
 };
 
 /**
@@ -122,7 +124,7 @@ const AUTO = {
  * not change the overall balance; edits in `offsets` (dB per bus) are added as given.
  */
 export function sectionMoves(sections, amount) {
-  const keys = ['vocals', 'drums', 'bass', 'music', 'fx', 'width', 'send'];
+  const keys = ['vocals', 'drums', 'bass', 'music', 'fx', 'width', 'send', 'lows', 'highs'];
   const total = sections.reduce((p, s) => p + (s.end - s.start), 0) || 1;
   const mean = Object.fromEntries(keys.map((k) => [k, sections.reduce((p, s) => p + (AUTO[s.label] || AUTO.Verse)[k] * (s.end - s.start), 0) / total]));
   return sections.map((s) => {
@@ -130,7 +132,7 @@ export function sectionMoves(sections, amount) {
     const o = s.offsets || {};
     const auto = (k) => (a[k] - mean[k]) * amount;
     const db = (k) => auto(k) + (o[k] || 0);
-    return { ...s, gains: { vocals: db('vocals'), drums: db('drums'), bass: db('bass'), music: db('music'), fx: db('fx') }, width: Math.max(0.5, 1 + auto('width')), send: Math.max(0, 1 + auto('send')) };
+    return { ...s, gains: { vocals: db('vocals'), drums: db('drums'), bass: db('bass'), music: db('music'), fx: db('fx') }, width: Math.max(0.5, 1 + auto('width')), send: Math.max(0, 1 + auto('send')), lows: auto('lows'), highs: auto('highs') };
   });
 }
 

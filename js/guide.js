@@ -23,12 +23,37 @@ export const GUIDE_HTML = `
   <li><b>Reverb</b> adds a touch of room to the whole song (the bass stays dry). <b>Vintage tape</b> adds warmth and a softer top; <b>tape hiss</b> adds faint tape noise, heard mostly in quiet parts.</li>
 </ul>
 
+<h2>Built on proven practice</h2>
+<p>MIXIT follows the habits of experienced mix and mastering engineers, so the automatic choices are the ones a careful person would make.</p>
+<ul>
+  <li><b>Clean low end.</b> Every stem except kick and bass gets a high-pass set just below where its useful sound starts, so the bottom of the mix belongs to the kick and bass.</li>
+  <li><b>Cut narrow, boost wide.</b> Problem spots (muddy, boxy, nasal, harsh) get narrow cuts only where they stand out; boosts are broad and gentle. Mastering moves stay small, and anything bigger is flagged as a job for the mix.</li>
+  <li><b>The vocal comes first.</b> It is cleaned up, has its loudest peaks caught before a gentle compressor, gets light tape warmth and a faint chorus, and the music, drum snap and kick click step back a little while someone sings.</li>
+  <li><b>Kick and bass take turns.</b> The bass dips only its lowest notes on each kick, and gains upper harmonics so it is still heard on phones and laptops.</li>
+  <li><b>Compression suits the instrument.</b> Vocals and keys are compressed gently, percussion harder and faster, and the whole mix only lightly. Multiband compression is used only when one range really jumps out.</li>
+  <li><b>Depth that stays clear.</b> Reverb and echo are rolled off at both ends, the vocal's reverb sits under its "s" sounds, the echo is de-essed and locked to the tempo, and compressors breathe with the beat.</li>
+  <li><b>The song moves.</b> With section moves on, verses are a little narrower, drier and thinner and choruses wide, wet and full range.</li>
+  <li><b>Masters that travel.</b> Treble boosts back off when cymbals are already loud, the limiter recovers quickly after hits and slowly on sustained parts, MP3s are made with extra headroom, and vinyl versions keep their transients.</li>
+</ul>
+
+<h2>Listening tips</h2>
+<ul>
+  <li>Compare at the same volume (the player does this for you). Louder nearly always sounds better, even when it isn't.</li>
+  <li>Check in mono now and then (Monitor → Mono in Advanced). If something important disappears, it needs fixing.</li>
+  <li>Listen on more than one system: speakers, headphones, a phone, the car. Headphones make mixes sound wider than they are.</li>
+  <li>Play a song you know well that sounds the way you want, then come back to yours.</li>
+  <li>Listen at a moderate level, and check quietly too; very loud or very quiet listening changes how much bass and treble you hear.</li>
+  <li>Take breaks, roughly ten minutes every hour. Tired ears push you toward too much treble.</li>
+  <li>When you think it's done, sleep on it and listen again in the morning.</li>
+</ul>
+
 <h2>Comparing fairly</h2>
 <p>Louder nearly always sounds "better", so the player matches every version to the same loudness and keeps your place when you switch. You hear what changed, not just the volume. In Advanced you can also hear how streaming apps would play it, approximate a phone, laptop or car speaker, or play only the difference.</p>
 
 <h2>Files</h2>
 <ul>
   <li><b>In:</b> WAV and AIFF (including the uncompressed AIFF that Logic and other Mac apps export) are read directly at their own sample rate. FLAC, MP3, M4A and OGG are decoded by the browser at 48 kHz.</li>
+  <li><b>Alternate mixes</b> (Advanced): vocal up 1 or 2 dB, bass up 1 dB, instrumental, a cappella, and a version without mix-bus processing for a mastering engineer.</li>
   <li><b>Out:</b> <b>Download all</b> packs everything into one ZIP, or grab each file on its own. A master comes as WAV, an MP3 for sharing, CD-quality WAV and FLAC with a quality report; a mix comes as WAV and MP3 with its stems (vocals, drums, bass, music, FX). The MP3 is 320 kbps, or a little lower for long songs so it stays under 10 MB. Advanced adds other bit depths and sample rates, versions for each platform, mono, vinyl, loops, frequency layers and 5.1 / 7.1.4 surround with a headphone version.</li>
 </ul>
 

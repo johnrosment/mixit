@@ -3,7 +3,7 @@
 
 import { measureLoudness, truePeak, integratedLufs, lin2db } from './loudness.js';
 import { ltas, bandCenters, bandLevels, rhythm } from './spectral.js';
-import { design, cascade } from './filters.js';
+import { design, cascade, lr4Split3 } from './filters.js';
 import { percentileDb } from './dynamics.js';
 import { detectHum, detectClicks, detectClipping, detectStereoDelay, detectBandwidth, noiseProfile } from './repair.js';
 
@@ -27,6 +27,38 @@ function filtered(x, coeffs) {
  * inter-channel delay, noise floor); they cost a few extra passes, so the
  * mastering chain only runs them on its input.
  */
+/**
+ * How much the lows (<120 Hz), mids and highs (>2.5 kHz) each move over the
+ * song compared with the whole mix: the spread (95th minus 10th percentile)
+ * of their 3 s levels while the music is playing. When one band moves much
+ * more than the whole, multiband compression is the right tool; when they
+ * move together, a single gentle compressor is enough.
+ */
+function bandDynamics(mono, sr) {
+  const hop = Math.round(sr * 0.1);
+  const H = Math.floor(mono.length / hop);
+  if (H < 60) return { spreadsDb: [0, 0, 0], fullDb: 0, unevennessDb: 0 };
+  const bands = lr4Split3(mono, 120, 2500, sr);
+  const series = [...bands, mono].map((x) => {
+    const e = new Float64Array(H);
+    for (let j = 0; j < H; j++) { let a = 0; for (let i = j * hop; i < (j + 1) * hop; i++) a += x[i] * x[i]; e[j] = a; }
+    const out = [];
+    let acc = 0;
+    for (let j = 0; j < H; j++) { acc += e[j]; if (j >= 30) acc -= e[j - 30]; if (j >= 29) out.push(10 * Math.log10(acc / (30 * hop) + 1e-12)); }
+    return out;
+  });
+  const full = series[3];
+  const loud = [...full].sort((a, b) => a - b)[Math.floor(full.length * 0.95)];
+  const active = full.map((v, i) => (v > loud - 20 ? i : -1)).filter((i) => i >= 0);
+  const spread = (arr) => {
+    const v = active.map((i) => arr[i]).sort((a, b) => a - b);
+    return v.length ? v[Math.floor(v.length * 0.95)] - v[Math.floor(v.length * 0.1)] : 0;
+  };
+  const spreadsDb = series.slice(0, 3).map(spread);
+  const fullDb = spread(full);
+  return { spreadsDb, fullDb, unevennessDb: Math.max(0, Math.max(...spreadsDb) - fullDb) };
+}
+
 export function analyze(audio, { progress = () => {}, repairScan = false } = {}) {
   const { sr } = audio;
   const chs = audio.channels.length > 1 ? audio.channels.slice(0, 2) : [audio.channels[0], audio.channels[0]];
@@ -146,6 +178,7 @@ export function analyze(audio, { progress = () => {}, repairScan = false } = {})
     boxDb: resIn(500, 1000),
     harshDb: resIn(2000, 5000),
     harshPeak: peakResidual(2000, 6000),
+    boxPeak: peakResidual(630, 1000),
     airDb: resIn(8000, 10000),
   };
 
@@ -198,7 +231,9 @@ export function analyze(audio, { progress = () => {}, repairScan = false } = {})
     };
   }
 
+  const bandDyn = bandDynamics(mono, sr);
   const result = {
+    bandDynamics: bandDyn,
     durationSec: n / sr,
     sampleRate: sr,
     sourceChannels: audio.channels.length,
@@ -263,18 +298,34 @@ export function suggest(m) {
     why.push(`Source already looks mastered (${I.toFixed(1)} LUFS, ${crest.toFixed(1)} dB crest). Processing is kept light and the target stays close to the current level.`);
   } else {
     s.targetLufs = -14;
-    if (crest > 18) { s.multiband = 0.5; s.glue = 0.35; why.push(`High crest factor (${crest.toFixed(1)} dB): more multiband and glue compression to control peaks before limiting.`); }
-    else if (crest < 12) { s.multiband = 0.2; s.glue = 0.15; why.push(`Moderate crest factor (${crest.toFixed(1)} dB): dynamics kept gentle.`); }
-    else { s.multiband = 0.35; s.glue = 0.28; }
+    if (crest > 18) { s.glue = 0.38; why.push(`High crest factor (${crest.toFixed(1)} dB): a little more glue compression to control peaks before limiting.`); }
+    else if (crest < 12) { s.glue = 0.15; why.push(`Moderate crest factor (${crest.toFixed(1)} dB): dynamics kept gentle.`); }
+    else s.glue = 0.28;
+    // Multiband only when one range moves much more than the whole mix; a
+    // single-band compressor does less harm otherwise.
+    const uneven = m.bandDynamics?.unevennessDb ?? 0;
+    if (uneven >= 3) {
+      s.multiband = Math.round(Math.min(0.55, 0.15 + 0.06 * uneven) * 20) / 20;
+      const names = ['lows', 'mids', 'highs'];
+      const worst = names[m.bandDynamics.spreadsDb.indexOf(Math.max(...m.bandDynamics.spreadsDb))];
+      why.push(`The ${worst} rise and fall ${uneven.toFixed(1)} dB more than the mix as a whole: multiband compression (${Math.round(s.multiband * 100)}%) evens that range out.`);
+    } else {
+      s.multiband = 0.12;
+      why.push('Lows, mids and highs move together, so a single gentle glue compressor does most of the work and multiband compression is kept light.');
+    }
   }
   if (m.loudness.lra > 12) why.push(`Wide loudness range (${m.loudness.lra.toFixed(1)} LU). Quiet passages will stay quiet relative to loud ones unless you raise multiband compression.`);
   const targetSlope = -4.5;
-  let tilt = Math.max(-3, Math.min(3, (targetSlope - t.slopeDbPerOct) * 1.2));
+  const rawTilt = (targetSlope - t.slopeDbPerOct) * 1.2;
+  // Mastering EQ stays subtle: at most 2 dB here; more is a job for the mix.
+  let tilt = Math.max(-2, Math.min(2, rawTilt));
+
   // Never darken material whose energy already sits low in the spectrum.
   if (tilt < 0 && (m.spectrum.centroidHz < 1200 || t.usableTopHz < 5000)) {
     tilt = 0;
     why.push(`Dark, band-limited source (centroid ${Math.round(m.spectrum.centroidHz)} Hz): its tonal character is preserved and no darkening tilt is applied.`);
   }
+  if (tilt !== 0 && Math.abs(rawTilt) > 2.5) why.push(`The mix leans quite ${rawTilt > 0 ? 'dark' : 'bright'} (it would take about ${Math.abs(rawTilt).toFixed(1)} dB of tilt to even out). The master moves it 2 dB; a bigger change sounds better made in the mix.`);
   if (Math.abs(tilt) >= 0.5) {
     s.tilt = Math.round(tilt * 2) / 2;
     why.push(`Spectral slope is ${t.slopeDbPerOct.toFixed(1)} dB/octave (reference ${targetSlope}). Tilt set to ${s.tilt > 0 ? '+' : ''}${s.tilt} dB to ${s.tilt > 0 ? 'brighten' : 'darken'} gently.`);
@@ -286,6 +337,19 @@ export function suggest(m) {
   } else s.deMud = 0;
   if (t.harshDb > 1.5) { s.resonance = Math.min(0.8, 0.3 + t.harshDb / 8); why.push(`Upper mids are ${t.harshDb.toFixed(1)} dB above trend: resonance control raised.`); }
   else if (s.resonance == null) s.resonance = 0.3;
+  // Narrow cuts for a harsh or nasal spot that stands out (cuts narrow, boosts wide).
+  if (t.harshPeak && t.harshPeak.db > 2.5) {
+    s.harshCut = Math.round(Math.min(2, (t.harshPeak.db - 1.5) * 0.8) * 2) / 2;
+    s.harshFreq = Math.round(t.harshPeak.freq);
+    why.push(`A harsh spot near ${s.harshFreq} Hz stands ${t.harshPeak.db.toFixed(1)} dB out of the trend: a narrow ${s.harshCut} dB cut is applied there.`);
+  } else s.harshCut = 0;
+  // Skipped when the low-mid cleanup already sits within half an octave.
+  const nearMud = s.deMud > 0 && Math.abs(Math.log2((t.boxPeak?.freq || 1) / (s.deMudFreq || 1))) < 0.5;
+  if (t.boxPeak && t.boxPeak.db > 2.5 && !nearMud) {
+    s.nasalCut = Math.round(Math.min(2, (t.boxPeak.db - 1.5) * 0.8) * 2) / 2;
+    s.nasalFreq = Math.round(t.boxPeak.freq);
+    why.push(`A boxy, nasal spot near ${s.nasalFreq} Hz stands ${t.boxPeak.db.toFixed(1)} dB out of the trend: a narrow ${s.nasalCut} dB cut is applied there.`);
+  } else s.nasalCut = 0;
   if (m.sibilance.indexDb > 16) { s.deess = Math.min(0.8, (m.sibilance.indexDb - 12) / 12); why.push(`Sibilance bursts reach ${m.sibilance.indexDb.toFixed(1)} dB above the typical 5-9 kHz level: de-esser enabled.`); }
   else s.deess = 0.15;
   if (m.stereo.lowCorrelation < 0.6) { s.monoBass = 120; why.push(`Low-end correlation is ${m.stereo.lowCorrelation.toFixed(2)}: bass below 120 Hz is folded to mono for translation.`); }
@@ -294,6 +358,10 @@ export function suggest(m) {
   if (m.stereo.correlation < 0.2) why.push(`Overall correlation is low (${m.stereo.correlation.toFixed(2)}); check the mix in mono (${m.stereo.monoLossLu.toFixed(1)} LU lost when folded).`);
   const bw = m.spectrum.bandwidth;
   if (t.airDb < -3 && t.slopeDbPerOct < -6 && !(bw && bw.limited && bw.bandwidthHz < 13000)) { s.air = 1.5; why.push('Very little energy above 8 kHz: a small air shelf is added.'); }
+  // A dull top end gets a little upper-band excitement: new harmonics rather
+  // than more of whatever noise sits up there.
+  if (t.airDb < -4 && m.spectrum.centroidHz < 2500 && !(bw && bw.limited)) { s.exciter = 0.2; why.push('The top end is dull: a light upper-band exciter adds fresh harmonics (more in quiet passages, less in loud ones).'); }
+  else s.exciter = 0;
   if (bw && bw.limited) why.push(`Content ends near ${(bw.bandwidthHz / 1000).toFixed(1)} kHz${bw.brickwall ? ' with a steep cut-off (typical of lossy encoding)' : ''}. The bandwidth guard keeps boosts from lifting noise above it.`);
   // Restoration is opt-in: detections are reported, never switched on automatically.
   const rp = m.repair;

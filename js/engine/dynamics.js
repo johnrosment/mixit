@@ -63,6 +63,18 @@ function gainComputer(x, T, R, W) {
   return d * (1 / R - 1);
 }
 
+/**
+ * Program-dependent release: short gain reductions recover quickly (less
+ * pumping after a hit), sustained ones slowly (less distortion and pumping on
+ * held notes). Returns a coefficient table indexed by how sustained the
+ * reduction has been (0..32) and the smoothing for that measure.
+ */
+function adaptiveRelease(releaseMs, sr, [lo, hi] = [0.45, 2.5]) {
+  const table = new Float64Array(33);
+  for (let k = 0; k <= 32; k++) table[k] = Math.exp(-1 / (Math.max(1, releaseMs * (lo + (hi - lo) * (k / 32))) * 1e-3 * sr));
+  return { table, susCoef: Math.exp(-1 / (0.35 * sr)) };
+}
+
 function decimateMin(arr, step) {
   const out = new Float32Array(Math.ceil(arr.length / step));
   for (let i = 0, j = 0; i < arr.length; i += step, j++) {
@@ -83,19 +95,25 @@ export function compress(chs, sr, opts = {}) {
   const {
     ratio = 2, knee = 6, attack = 10, release = 120, makeup = 'auto', mix = 1,
     rmsMs = 0, sidechain = null, threshold = null, thresholdPct = 0.8, thresholdOffset = 0,
-    maxGr = 30, curveStepSec = 0.05,
+    maxGr = 30, curveStepSec = 0.05, adaptive = false,
   } = opts;
   const n = chs[0].length;
   const det = detectorDb(sidechain || chs, sr, rmsMs);
   const T = threshold ?? percentileDb(det, thresholdPct) + thresholdOffset;
   const aA = Math.exp(-1 / (Math.max(0.05, attack) * 1e-3 * sr));
   const aR = Math.exp(-1 / (Math.max(1, release) * 1e-3 * sr));
+  const ad = adaptive ? adaptiveRelease(release, sr) : null;
   const gr = new Float32Array(n);
-  let gs = 0, maxRed = 0, sumRed = 0, active = 0, considered = 0;
+  let gs = 0, sus = 0, maxRed = 0, sumRed = 0, active = 0, considered = 0;
   for (let i = 0; i < n; i++) {
     let gc = gainComputer(det[i], T, ratio, knee);
     if (gc < -maxGr) gc = -maxGr;
-    gs = gc < gs ? aA * gs + (1 - aA) * gc : aR * gs + (1 - aR) * gc;
+    let r = aR;
+    if (ad) {
+      sus = ad.susCoef * sus + (1 - ad.susCoef) * (gc < -1 ? 1 : 0);
+      r = ad.table[(sus * 32) | 0];
+    }
+    gs = gc < gs ? aA * gs + (1 - aA) * gc : r * gs + (1 - r) * gc;
     gr[i] = gs;
     if (det[i] > T - 30) {
       considered++;
@@ -248,11 +266,13 @@ export function limitWithEnvelope(chs, sr, peakEnv, { gainDb = 0, ceilingDb = -1
     const k = i - L + 1;
     if (k >= 0 && k < n) h[k] = req(dq[head]);
   }
-  // Release: recover toward unity, never above the required gain.
-  const rel = 1 - Math.exp(-1 / (Math.max(1, releaseMs) * 1e-3 * sr));
-  let prev = 1;
+  // Release: recover toward unity, never above the required gain. Program
+  // dependent: quick after short peaks, slower once limiting has been sustained.
+  const ad = adaptiveRelease(releaseMs, sr, [0.5, 1.8]);
+  let prev = 1, sus = 0;
   for (let k = 0; k < n; k++) {
-    const up = prev + (1 - prev) * rel;
+    sus = ad.susCoef * sus + (1 - ad.susCoef) * (prev < 0.89 ? 1 : 0);
+    const up = prev + (1 - prev) * (1 - ad.table[(sus * 32) | 0]);
     prev = h[k] < up ? h[k] : up;
     h[k] = prev;
   }
@@ -285,7 +305,7 @@ export function limitWithEnvelope(chs, sr, peakEnv, { gainDb = 0, ceilingDb = -1
 }
 
 export function peakEnvelope(chs, sr) {
-  return truePeakEnvelope(chs, sr, 8).env;
+  return truePeakEnvelope(chs, sr, 24).env;
 }
 
 // Keeps the largest-magnitude value (either sign) per step, for signed gain curves.
@@ -581,4 +601,34 @@ export function hfPeakReserve(chs, sr, { amount = 0.5, freq = 5000, limitAt, max
     peakOverBeforeDb: 20 * Math.log10(peakBefore / limitAt), peakOverAfterDb: 20 * Math.log10(peakAfter / limitAt),
     curve: decimateMin(gr, Math.max(1, Math.round(sr * curveStepSec))), curveStepSec,
   };
+}
+
+/**
+ * Dynamic high-shelf boost ("subtle shine"): part of the boost is static, the
+ * rest backs off while the band above `freq` is louder than usual (cymbals,
+ * snare cracks, sibilance), so a brighter master does not turn harsh. Zero
+ * phase: the band is the input minus its zero-phase low-pass.
+ */
+export function dynamicShelf(chs, sr, { freq = 8000, gainDb = 0, staticPart = 0.4, rangeDb = 6, curveStepSec = 0.05 } = {}) {
+  if (gainDb <= 0.05) return null;
+  const n = chs[0].length;
+  const hi = chs.map((ch) => { const lp = zeroPhaseLowpass(ch, freq, sr); const h = new Float32Array(n); for (let i = 0; i < n; i++) h[i] = ch[i] - lp[i]; return h; });
+  // Band level against its own typical level (20 ms attack, 150 ms release).
+  const det = detectorDb(hi, sr, 5);
+  const typical = percentileDb(det, 0.6);
+  const aA = Math.exp(-1 / (0.02 * sr)), aR = Math.exp(-1 / (0.15 * sr));
+  const full = Math.pow(10, gainDb / 20) - 1;
+  const curve = new Float32Array(n);
+  let e = 0, sumBoost = 0;
+  for (let i = 0; i < n; i++) {
+    const over = Math.max(0, det[i] - typical);
+    const want = 1 - Math.min(1, over / rangeDb);
+    e = want < e ? aA * e + (1 - aA) * want : aR * e + (1 - aR) * want;
+    const k = full * (staticPart + (1 - staticPart) * e);
+    for (let c = 0; c < chs.length; c++) chs[c][i] += hi[c][i] * k;
+    curve[i] = 20 * Math.log10(1 + k);
+    sumBoost += curve[i];
+  }
+  const step = Math.max(1, Math.round(sr * curveStepSec));
+  return { freq, gainDb, avgDb: sumBoost / n, minDb: 20 * Math.log10(1 + full * staticPart), curve: decimateMin(curve, step).map((v) => v), curveStepSec };
 }
