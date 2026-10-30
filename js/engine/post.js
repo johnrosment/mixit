@@ -34,6 +34,30 @@ function windowLoudness(chs, sr, hopSec, windowHops) {
   return { loud: out, hop };
 }
 
+/**
+ * Loudness of the speech around each hop: a centred window (450 ms by default)
+ * that counts only hops where someone is speaking (within `gateDb` of the loud
+ * moments), so a window reaching into a pause does not read low. `active`
+ * marks the speech hops.
+ */
+function phraseLoudness(chs, sr, { hopSec = 0.05, windowHops = 9, gateDb = 25 } = {}) {
+  const { energy, hop } = hopEnergies(chs, sr, hopSec);
+  const H = energy.length;
+  const level = Float32Array.from(energy, (e) => db(e / hop));
+  const top = pctl(level, 0.95);
+  // A silent stem has no speech (rather than every hop counting as speech).
+  const active = Uint8Array.from(level, (v) => (top > -70 && v > top - gateDb ? 1 : 0));
+  const pe = new Float64Array(H + 1), pc = new Uint32Array(H + 1);
+  for (let j = 0; j < H; j++) { pe[j + 1] = pe[j] + (active[j] ? energy[j] : 0); pc[j + 1] = pc[j] + active[j]; }
+  const half = windowHops >> 1;
+  const loud = new Float32Array(H).fill(-120);
+  for (let j = 0; j < H; j++) {
+    const a = Math.max(0, j - half), b = Math.min(H, j + half + 1);
+    if (pc[b] > pc[a]) loud[j] = db((pe[b] - pe[a]) / ((pc[b] - pc[a]) * hop));
+  }
+  return { loud, active, hop };
+}
+
 /** Per-sample gain (dB per hop, linearly interpolated) applied to every channel, optionally to one band only. */
 function applyHopGain(chs, sr, gDb, hop, band = null) {
   const n = chs[0].length;
@@ -50,33 +74,39 @@ function applyHopGain(chs, sr, gDb, hop, band = null) {
 
 /**
  * Dialogue leveller: brings each phrase toward the voice's typical level
- * (400 ms loudness against the median of the speech), by up to `maxDb`, and
- * leaves pauses alone so breaths and room noise are not pulled up.
+ * (centred phrase loudness against the median of the speech), by up to
+ * `maxDb`. The whole file is known, so each move is in place when its phrase
+ * starts: a pause takes the gain of the phrase before it for its first half
+ * and of the next phrase for its second half, and the gain is smoothed both
+ * ways. Breaths and room noise in pauses are never pulled up on their own.
  */
 export function levelSpeech(chs, sr, { amount = 0.6, maxDb = 9 } = {}) {
   if (amount <= 0.01) return null;
-  const { loud, hop } = windowLoudness(chs, sr, 0.05, 8);
-  const top = pctl(loud, 0.95);
-  const active = Array.from(loud, (v) => v > top - 25);
-  const speech = Array.from(loud).filter((_, j) => active[j]);
+  const hopSec = 0.05;
+  const { loud, active, hop } = phraseLoudness(chs, sr, { hopSec });
+  const speech = loud.filter((_, j) => active[j]);
   if (speech.length < 20) return null;
   const target = pctl(speech, 0.5);
-  const g = new Float32Array(loud.length);
-  let cur = 0;
-  const a = Math.exp(-1 / (0.15 / 0.05)); // 150 ms smoothing at 50 ms hops
-  for (let j = 0; j < loud.length; j++) {
-    const want = active[j] ? Math.max(-maxDb, Math.min(maxDb, (target - loud[j]) * amount)) : cur * 0.97;
-    cur = a * cur + (1 - a) * want;
-    g[j] = cur;
+  const H = loud.length;
+  const g = new Float32Array(H);
+  for (let j = 0; j < H; j++) if (active[j]) g[j] = Math.max(-maxDb, Math.min(maxDb, (target - loud[j]) * amount));
+  for (let j = 0; j < H; j++) {
+    if (active[j]) continue;
+    let k = j;
+    while (k < H && !active[k]) k++;
+    const prev = j > 0 ? g[j - 1] : k < H ? g[k] : 0, next = k < H ? g[k] : prev;
+    for (let i = j; i < k; i++) g[i] = i < (j + k) / 2 ? prev : next;
+    j = k;
   }
+  const a = Math.exp(-hopSec / 0.15); // 150 ms each way
+  for (let j = 1; j < H; j++) g[j] = a * g[j - 1] + (1 - a) * g[j];
+  for (let j = H - 2; j >= 0; j--) g[j] = a * g[j + 1] + (1 - a) * g[j];
   applyHopGain(chs, sr, g, hop);
-  const after = windowLoudness(chs, sr, 0.05, 8).loud;
-  const act = Array.from(after).filter((_, j) => active[j]);
-  return {
-    spreadBeforeDb: pctl(speech, 0.9) - pctl(speech, 0.1),
-    spreadAfterDb: pctl(act, 0.9) - pctl(act, 0.1),
-    maxBoostDb: Math.max(0, ...g), maxCutDb: -Math.min(0, ...g),
-  };
+  const after = phraseLoudness(chs, sr, { hopSec }).loud;
+  const act = after.filter((_, j) => active[j]);
+  let up = 0, down = 0;
+  for (const v of g) { if (v > up) up = v; else if (v < down) down = v; }
+  return { spreadBeforeDb: pctl(speech, 0.9) - pctl(speech, 0.1), spreadAfterDb: pctl(act, 0.9) - pctl(act, 0.1), maxBoostDb: up, maxCutDb: -down };
 }
 
 /**
@@ -199,18 +229,23 @@ export function duckUnderSpeech(target, key, sr, { amountDb = 6, attackMs = 60, 
   if (amountDb <= 0.05) return null;
   const { loud, hop } = windowLoudness(key, sr, 0.01, 30);
   const top = pctl(loud, 0.95);
+  if (top < -70) return null; // the dialogue is silent: nothing to duck under
   const holdHops = Math.round(holdMs / 10);
   const g = new Float32Array(loud.length);
   const aA = Math.exp(-1 / (attackMs / 10)), aR = Math.exp(-1 / (releaseMs / 10));
-  let held = 0, cur = 0, sum = 0, active = 0;
+  let held = 0, cur = 0;
   for (let j = 0; j < loud.length; j++) {
     if (loud[j] > top - 20) held = holdHops; else if (held > 0) held--;
     const want = held > 0 ? -amountDb : 0;
     cur = want < cur ? aA * cur + (1 - aA) * want : aR * cur + (1 - aR) * want;
     g[j] = cur;
-    sum += cur;
-    if (cur < -1) active++;
   }
+  // The whole file is known: lead the voice by twice the attack, so the dip
+  // is mostly in place by the first word.
+  const lead = Math.min(g.length, Math.round((2 * attackMs) / 10));
+  if (lead) { const last = g[g.length - 1]; g.copyWithin(0, lead); g.fill(last, g.length - lead); }
+  let sum = 0, active = 0;
+  for (const v of g) { sum += v; if (v < -1) active++; }
   applyHopGain(target, sr, g, hop, band);
   return { amountDb, avgDb: -sum / g.length, activePct: (100 * active) / g.length };
 }
@@ -234,10 +269,9 @@ export function deliveryCheck(out, dialogue, sr, { standard, achievedLufs, trueP
   }
   let voice = null;
   if (dialogue) {
-    const d = windowLoudness(dialogue, sr, 0.1, 4).loud;
-    const top = pctl(d, 0.95);
-    const act = Array.from(d).filter((v) => v > top - 20);
-    if (act.length > 10) voice = { spreadDb: pctl(act, 0.9) - pctl(act, 0.1) };
+    const p = phraseLoudness(dialogue, sr, { gateDb: 20 });
+    const act = p.loud.filter((_, j) => p.active[j]);
+    if (act.length > 20) voice = { spreadDb: pctl(act, 0.9) - pctl(act, 0.1) };
   }
   return {
     standard, label: spec?.label || 'Custom', targetLufs: spec?.lufs ?? null, ceiling: spec?.ceiling ?? null, tolerance: spec?.tolerance ?? null,

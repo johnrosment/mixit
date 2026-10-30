@@ -233,6 +233,9 @@ export function initMaster({ engine, onMode }) {
     state.locked.clear();
     const keep = Object.fromEntries(OUTPUT_ONLY.map((k) => [k, state.values[k]]));
     Object.assign(state.values, MASTER_DEFAULTS, PROFILES[key].set, keep);
+    // A chosen video, podcast or TV standard keeps its loudness and peak limit.
+    const std = DELIVERY[state.values.delivery];
+    if (std) Object.assign(state.values, { targetLufs: std.lufs, ceiling: std.ceiling });
     controls.update(state.values);
     $('m-profile-hint').textContent = PROFILES[key].hint;
     persist();

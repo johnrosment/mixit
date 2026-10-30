@@ -431,7 +431,10 @@ export class MixSession {
       }
       if (used.fx) postDucks.fx = duckUnderSpeech(buses.fx, buses.vocals, sr, { amountDb: s.sfxDuck ?? 2, attackMs: 20, releaseMs: 300, holdMs: 150 });
       if (used.ambience) postDucks.ambience = duckUnderSpeech(buses.ambience, buses.vocals, sr, { amountDb: s.ambDuck ?? 3, attackMs: 150, releaseMs: 1200, holdMs: 500 });
-      const parts = [postDucks.music ? `music ${fmt(-postDucks.music.amountDb)} dB (plus ${fmt(-postDucks.carve.amountDb)} dB at 1-4 kHz)` : null, postDucks.fx ? `effects ${fmt(-postDucks.fx.amountDb)} dB` : null, postDucks.ambience ? `ambience ${fmt(-postDucks.ambience.amountDb)} dB` : null].filter(Boolean);
+      // Either music dip may be off (null).
+      const { music: dm, carve: dc } = postDucks;
+      const musicPart = dm && dc ? `music ${fmt(-dm.amountDb)} dB (plus ${fmt(-dc.amountDb)} dB at 1-4 kHz)` : dm ? `music ${fmt(-dm.amountDb)} dB` : dc ? `music ${fmt(-dc.amountDb)} dB at 1-4 kHz` : null;
+      const parts = [musicPart, postDucks.fx ? `effects ${fmt(-postDucks.fx.amountDb)} dB` : null, postDucks.ambience ? `ambience ${fmt(-postDucks.ambience.amountDb)} dB` : null].filter(Boolean);
       if (parts.length) log.push(`Under the dialogue: ${parts.join(', ')}, coming back up in pauses.`);
     }
     if (!post && used.vocals && used.music && (s.duckAmount || 0) > 0) {
@@ -760,15 +763,20 @@ export class MixSession {
       if (lv[j] > vocI - 15 && li[j] > -70) last = Math.max(-maxMove, Math.min(maxMove, (target - (lv[j] - li[j])) * 0.7));
       want[j] = last;
     }
-    // Moving-average smoothing over the section window.
+    // Moving-average smoothing over the section window. Both the 400 ms level
+    // and the average look back, so the result is moved earlier by half of
+    // each, and every move lines up with the section it belongs to.
     const w = Math.max(1, Math.round(windowSec / 0.1));
-    const sm = new Float32Array(H);
+    const trail = new Float32Array(H);
     let acc = 0;
     for (let j = 0; j < H; j++) {
       acc += want[j];
       if (j >= w) acc -= want[j - w];
-      sm[j] = acc / Math.min(j + 1, w);
+      trail[j] = acc / Math.min(j + 1, w);
     }
+    const shift = Math.round(1.5 + (w - 1) / 2);
+    const sm = new Float32Array(H);
+    for (let j = 0; j < H; j++) sm[j] = trail[Math.min(H - 1, j + shift)];
     let minDb = 0, maxDb = 0;
     const hop = hv.hop;
     for (let i = 0; i < n; i++) {

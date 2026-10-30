@@ -20,7 +20,7 @@ export const GUIDE_HTML = `
 <ul>
   <li><b>Dialogue first.</b> Each voice is cleaned up, its quiet and loud phrases are evened out, and every speaker is brought to the same level before anything else is added. Song-style warmth, chorus and pitch work are left off.</li>
   <li><b>Clean edits.</b> Mouth clicks, ticks and pops are taken out of dialogue, effects and ambience, and every place one of them starts or stops gets a short fade (1 frame unless you change it in Advanced), so no edit clicks. Words and hits keep their attack.</li>
-  <li><b>Music, effects and ambience make room.</b> They step back while someone speaks and come back up in the pauses; the music also clears the range the words live in.</li>
+  <li><b>Music, effects and ambience make room.</b> They step back while someone speaks, already down by the first word, and come back up in the pauses; the music also clears the range the words live in.</li>
   <li><b>Made for.</b> Pick where it's going: online video (-14 LUFS), podcast (-16), TV in Europe (EBU R128, -23, peaks -1) or TV in the US (ATSC A/85, -24, peaks -2). These are common targets; always check the spec from your broadcaster, platform or client.</li>
   <li><b>Delivery check.</b> The result lists whether loudness and peaks are within the standard, any dead air (silence of 2 seconds or more), and how even the voices are.</li>
   <li>Mastering a finished ad or episode? On the Master page in Advanced, <b>Made for</b> sets the same standards.</li>
@@ -63,9 +63,9 @@ export const GUIDE_HTML = `
 
 <h2>Files</h2>
 <ul>
-  <li><b>In:</b> WAV and AIFF (including the uncompressed AIFF that Logic and other Mac apps export) are read directly at their own sample rate. FLAC, MP3, M4A and OGG are decoded by the browser at 48 kHz.</li>
-  <li><b>Alternate mixes</b> (Advanced): vocal up 1 or 2 dB, bass up 1 dB, instrumental, a cappella, and a version without mix-bus processing for a mastering engineer.</li>
-  <li><b>Out:</b> <b>Download all</b> packs everything into one ZIP, or grab each file on its own. A master comes as WAV, an MP3 for sharing, CD-quality WAV and FLAC with a quality report; a mix comes as WAV and MP3 with its stems (vocals, drums, bass, music, FX). The MP3 is 320 kbps, or a little lower for long songs so it stays under 10 MB. Advanced adds other bit depths and sample rates, versions for each platform, mono, vinyl, loops, frequency layers and 5.1 / 7.1.4 surround with a headphone version.</li>
+  <li><b>In:</b> WAV and AIFF (including the uncompressed AIFF that Logic and other Mac apps export) are read directly at their own sample rate. FLAC, MP3, M4A and OGG are decoded by the browser at 48 kHz. Surround files (5.1, 7.1) are folded down to stereo, centre included.</li>
+  <li><b>Alternate mixes</b> (Advanced, songs): vocal up 1 or 2 dB, bass up 1 dB, instrumental, a cappella, and a version without mix-bus processing for a mastering engineer.</li>
+  <li><b>Out:</b> <b>Download all</b> packs everything into one ZIP, or grab each file on its own. A master comes as WAV, an MP3 for sharing, CD-quality WAV and FLAC with a quality report; a mix comes as WAV and MP3 with its stems (vocals, drums, bass, music, FX; or dialogue, music, effects and ambience for a video). The MP3 is 320 kbps, or a little lower for long songs so it stays under 10 MB. Advanced adds other bit depths and sample rates, versions for each platform, mono, vinyl, loops, frequency layers and 5.1 / 7.1.4 surround with a headphone version.</li>
 </ul>
 
 <h2>Good to know</h2>

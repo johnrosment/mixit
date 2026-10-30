@@ -145,7 +145,7 @@ export function fitBalance(buses, rough) {
       rows.push({ r, e, b });
     }
   }
-  const peak = Math.max(...rows.map((x) => x.r));
+  const peak = rows.reduce((m, x) => Math.max(m, x.r), 0);
   const use = rows.filter((x) => x.r > peak * 1e-5 && x.e.some((v) => v > 0));
   if (use.length < 12) return null;
   // Model: rough = tone[band] × Σ gain[bus] × bus energy. The per-band tone

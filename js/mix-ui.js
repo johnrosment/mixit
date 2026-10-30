@@ -87,11 +87,11 @@ const SCHEMA = [
     { key: 'ambDuck', label: 'Ambience under the voices', type: 'range', min: 0, max: 10, step: 0.5, unit: ' dB', zeroLabel: 'Off', help: 'Room tone and backgrounds sink a little under speech.' },
   ] },
   { title: 'Balance', open: true, items: [
-    { key: 'autoBalance', label: 'Even out the levels', type: 'toggle', help: 'Balances vocals, drums, bass and music before your own moves. With a rough mix loaded, its balance is used instead.' },
+    { key: 'autoBalance', label: 'Even out the levels', type: 'toggle', help: { song: 'Balances vocals, drums, bass and music before your own moves. With a rough mix loaded, its balance is used instead.', post: 'Balances dialogue, music, effects and ambience before your own moves. With a rough mix loaded, its balance is used instead.' } },
     { key: 'balanceAmount', label: 'How much to even out', type: 'range', min: 0, max: 1, step: 0.05, format: pct, help: 'Lower keeps more of the levels your stems came in with.' },
     { key: 'roughTone', label: 'Lean toward your rough mix’s tone', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'Gently moves the final tone toward your rough mix.' },
-    { key: 'vocalLevel', label: 'Vocal level', type: 'range', min: -12, max: 12, step: 0.5, unit: ' dB', signed: true, help: 'Turns the whole vocal up or down.' },
-    { key: 'vocalPresence', label: 'Vocal clarity', type: 'range', min: 0, max: 1, step: 0.05, format: pct, help: 'Above 50% is crisper; below is softer.' },
+    { key: 'vocalLevel', label: { song: 'Vocal level', post: 'Dialogue level' }, type: 'range', min: -12, max: 12, step: 0.5, unit: ' dB', signed: true, help: { song: 'Turns the whole vocal up or down.', post: 'Turns all the dialogue up or down.' } },
+    { key: 'vocalPresence', label: { song: 'Vocal clarity', post: 'Voice clarity' }, type: 'range', min: 0, max: 1, step: 0.05, format: pct, help: 'Above 50% is crisper; below is softer.' },
     { key: 'riderStrength', only: 'song', label: 'Keep the vocal steady', type: 'range', min: 0, max: 1, step: 0.05, format: (v) => (v ? `±${(4 * v).toFixed(1)} dB` : 'Off'), help: 'Keeps the vocal at the same level over quiet and loud parts.' },
     { key: 'riderWindow', only: 'song', label: 'How quickly it rides', type: 'range', min: 0.5, max: 4, step: 0.1, unit: ' s', help: 'Shorter reacts faster; longer is smoother.' },
   ] },
@@ -112,7 +112,7 @@ const SCHEMA = [
   { title: 'Mix tone', items: [
     { key: 'mixLow', label: 'Lows', type: 'range', min: -6, max: 6, step: 0.5, unit: ' dB', signed: true, help: 'Adds or removes weight across the whole mix.' },
     { key: 'mixHigh', label: 'Highs', type: 'range', min: -6, max: 6, step: 0.5, unit: ' dB', signed: true, help: 'Adds or removes brightness across the whole mix.' },
-    { key: 'mixTape', label: 'Vintage tape', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'Warmth and a softer top end, like an old tape machine.' },
+    { key: 'mixTape', only: 'song', label: 'Vintage tape', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'Warmth and a softer top end, like an old tape machine.' },
     { key: 'musicCleanup', label: 'Clean up muddy instruments', type: 'toggle', help: 'Cuts muddy or boxy build-up in the instruments where it stands out.' },
   ] },
   { title: 'Pitch correction', only: 'song', items: [
@@ -148,12 +148,12 @@ const SCHEMA = [
     { key: 'bitDepth', label: 'Bit depth', type: 'select', numeric: true, options: [{ value: 16, label: '16-bit (CD)' }, { value: 24, label: '24-bit (recommended)' }, { value: 32, label: '32-bit float' }] },
     { key: 'dither', label: 'Dither', type: 'select', options: [{ value: 'tpdf', label: 'Standard' }, { value: 'shaped', label: 'Noise-shaped (best for 16-bit)' }, { value: 'none', label: 'None' }] },
     { key: 'outputRate', label: 'Sample rate', type: 'select', numeric: true, options: [{ value: 0, label: 'Same as the stems' }, { value: 44100, label: '44.1 kHz' }, { value: 48000, label: '48 kHz' }, { value: 96000, label: '96 kHz' }, { value: 192000, label: '192 kHz' }] },
-    { key: 'renderBusStems', label: 'Also save each bus', type: 'toggle', help: 'Vocals, drums, bass, music and FX as separate files.' },
-    { key: 'alternates', label: 'Alternate mixes', type: 'toggle', help: 'Also makes vocal up 1 and 2 dB, bass up 1 dB, instrumental, a cappella and a version without mix-bus processing. Takes longer.' },
+    { key: 'renderBusStems', label: 'Also save each bus', type: 'toggle', help: { song: 'Vocals, drums, bass, music and FX as separate files.', post: 'Dialogue, music, effects and ambience as separate files.' } },
+    { key: 'alternates', only: 'song', label: 'Alternate mixes', type: 'toggle', help: 'Also makes vocal up 1 and 2 dB, bass up 1 dB, instrumental, a cappella and a version without mix-bus processing. Takes longer.' },
   ] },
   { title: 'Surround', items: [
     { key: 'spatial', label: 'Surround mix', type: 'select', options: [{ value: 'off', label: 'Off' }, { value: '5.1', label: '5.1 speakers' }, { value: '7.1.4', label: '7.1.4 speakers (with height)' }], help: 'A surround speaker version of the mix, plus a headphone version. Not a Dolby Atmos master.' },
-    { key: 'spatialCentre', label: 'Vocal in the centre speaker', type: 'range', min: 0, max: 1, step: 0.05, format: pct, help: 'How much of the vocal goes to the middle speaker.' },
+    { key: 'spatialCentre', label: { song: 'Vocal in the centre speaker', post: 'Dialogue in the centre speaker' }, type: 'range', min: 0, max: 1, step: 0.05, format: pct, help: { song: 'How much of the vocal goes to the middle speaker.', post: 'How much of the dialogue goes to the middle speaker.' } },
     { key: 'spatialLfe', label: 'Subwoofer level', type: 'range', min: -30, max: -6, step: 1, format: (v) => (v <= -30 ? 'Off' : `${v} dB`), help: 'How much kick and bass also go to the subwoofer.' },
   ] },
 ];
@@ -326,7 +326,10 @@ export function initMix({ engine, sendToMaster, onMode }) {
   function renderBuses() {
     const root = $('x-buses');
     root.innerHTML = '';
-    root.append(el('span', { class: 'head' }, ''), el('span', { class: 'head' }, 'Level / tone'), el('span', { class: 'head' }, 'Glue / width'), el('span', { class: 'head' }, 'Reverb / delay'));
+    // A video, ad or podcast has no bus sends (the voices' room is set above).
+    const sends = project !== 'post';
+    root.classList.toggle('no-sends', !sends);
+    root.append(el('span', { class: 'head' }, ''), el('span', { class: 'head' }, 'Level / tone'), el('span', { class: 'head' }, 'Glue / width'), sends ? el('span', { class: 'head' }, 'Reverb / delay') : null);
     for (const [key, label] of categories()) {
       const b = state.buses[key];
       const slider = (prop, min, max, step, fmt) => {
@@ -343,11 +346,11 @@ export function initMix({ engine, sendToMaster, onMode }) {
         el('span', { class: 'bus-name', style: `--c: var(${BUS_COLORS[key]})` }, label),
         el('div', { style: `--c: var(${BUS_COLORS[key]})` }, slider('gain', -12, 12, 0.5, (v) => `${v > 0 ? '+' : ''}${v} dB`)),
         el('div', { style: `--c: var(${BUS_COLORS[key]})` }, slider('glue', 0, 1, 0.05, (v) => `glue ${pct(v)}`)),
-        el('div', { style: `--c: var(${BUS_COLORS[key]})` }, slider('sendReverb', 0, 1, 0.01, (v) => `verb ${pct(v)}`)),
+        sends ? el('div', { style: `--c: var(${BUS_COLORS[key]})` }, slider('sendReverb', 0, 1, 0.01, (v) => `verb ${pct(v)}`)) : null,
         el('span'),
         el('div', { style: `--c: var(${BUS_COLORS[key]})` }, tone),
         el('div', { style: `--c: var(${BUS_COLORS[key]})` }, slider('width', 0, 1.6, 0.05, (v) => `width ${pct(v)}`)),
-        el('div', { style: `--c: var(${BUS_COLORS[key]})` }, slider('sendDelay', 0, 1, 0.01, (v) => `delay ${pct(v)}`)),
+        sends ? el('div', { style: `--c: var(${BUS_COLORS[key]})` }, slider('sendDelay', 0, 1, 0.01, (v) => `delay ${pct(v)}`)) : null,
       );
     }
   }
@@ -563,7 +566,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
       declick: v.declick, editFades: v.editFades, frameRate: v.frameRate,
       outputMode: 'loudness', targetLufs: d.lufs, ceiling: d.ceiling, riderStrength: 0, sectionAuto: 0, alternates: false,
       buses, reverb: { enabled: (v.dialogueRoom || 0) > 0.01, kind: 'room', decay: 0.6, predelay: 10, level: -16 }, delay: { enabled: false },
-      vocalChorus: 0, mixTape: 0, mixGlue: Math.min(v.mixGlue, 0.15),
+      vocalChorus: 0, mixTape: 0, mixGlue: 0.6 * v.mixGlue,
     };
   }
   function engineBase(sessionStems, job) {
@@ -670,7 +673,11 @@ export function initMix({ engine, sendToMaster, onMode }) {
       return { name, data: new Uint8Array(buffer) };
     };
     const tag = r.spatial ? r.spatial.layout.replace(/\./g, '') : '';
-    const BUS_NAMES = Object.fromEntries(categories());
+    // Bus names as the render's project calls them (dialogue.wav, effects.wav in a video mix).
+    const post = rep.settings.mode === 'post';
+    const BUS_NAMES = Object.fromEntries(post ? POST_CATEGORIES : SONG_CATEGORIES);
+    const busName = (k) => BUS_NAMES[k] || k[0].toUpperCase() + k.slice(1);
+    const busFile = (k) => busName(k).toLowerCase();
     // Download all: the mix and each bus stem; in Advanced also the surround
     // files and data files.
     const mixMp3 = async () => ({ name: 'mix.mp3', data: (await encodeMp3({ sr: r.sr, channels: r.channels }, { meta: { title: 'Mix' }, peakDbtp: out.peak.truePeakDbtp })).data });
@@ -678,7 +685,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
     const kbps = mp3Bitrate(secs);
     const packageFiles = async (full) => {
       const files = [await wav(r.channels, 'mix.wav'), await mixMp3()];
-      for (const [k, chs] of Object.entries(r.busStems || {})) files.push(await wav(chs, `stems/${k}.wav`));
+      for (const [k, chs] of Object.entries(r.busStems || {})) files.push(await wav(chs, `stems/${busFile(k)}.wav`));
       if (full && r.spatial) {
         files.push(await wav(r.spatial.chs, `mix_spatial_${tag}.wav`, LAYOUTS[r.spatial.layout].mask));
         if (r.binaural) files.push(await wav(r.binaural.chs, `mix_binaural_${tag}.wav`));
@@ -691,7 +698,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
       { label: 'Download all (ZIP)', sub: r.busStems ? 'the mix and every stem below' : 'every file below', primary: true, easy: true, run: async () => download(makeZip(await packageFiles(document.documentElement.dataset.mode !== 'easy')), 'mix_all.zip') },
       { label: 'Mix WAV', sub: `${fx(out.loudness.integrated, 1)} LUFS · ${fx(out.peak.truePeakDbtp, 1)} dBTP`, easy: true, run: async () => { const f = await wav(r.channels, 'mix.wav'); download(f.data, f.name, 'audio/wav'); } },
       { label: 'Mix MP3', sub: `${kbps} kbps · about ${mp3SizeMb(kbps, secs).toFixed(1)} MB · for sharing`, easy: true, run: async () => { const f = await mixMp3(); download(f.data, f.name, 'audio/mpeg'); } },
-      ...Object.entries(r.busStems || {}).map(([k, chs]) => ({ label: `${BUS_NAMES[k] || k} stem`, sub: 'WAV, processed', easy: true, run: async () => { const f = await wav(chs, `${k}.wav`); download(f.data, f.name, 'audio/wav'); } })),
+      ...Object.entries(r.busStems || {}).map(([k, chs]) => ({ label: `${busName(k)} stem`, sub: 'WAV, processed', easy: true, run: async () => { const f = await wav(chs, `${busFile(k)}.wav`); download(f.data, f.name, 'audio/wav'); } })),
     ];
     if (r.spatial) {
       items.push({ label: `Spatial ${r.spatial.layout} WAV`, sub: `${r.spatial.chs.length} channels · ${fx(r.spatial.lufs, 1)} LUFS`, run: async () => { const f = await wav(r.spatial.chs, `mix_spatial_${tag}.wav`, LAYOUTS[r.spatial.layout].mask); download(f.data, f.name, 'audio/wav'); } });
@@ -716,7 +723,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
     const grid = el('div', { class: 'chart-grid' });
     grid.append(loudnessChart([{ label: 'Mix', color: '--accent', analysis: out }], { target: rep.settings.outputMode === 'loudness' ? rep.settings.targetLufs : null }));
     const bs = rep.busSpectra;
-    const busEntries = Object.entries(bs.levels).map(([k, levels]) => ({ label: k[0].toUpperCase() + k.slice(1), color: BUS_COLORS[k], centers: bs.centers, levels }));
+    const busEntries = Object.entries(bs.levels).map(([k, levels]) => ({ label: busName(k), color: BUS_COLORS[k], centers: bs.centers, levels }));
     grid.append(spectrumChart([...busEntries, { label: 'Mix', color: '--text', centers: out.spectrum.bands.centers, levels: out.spectrum.bands.levels, dash: [5, 4], width: 1.2 }],
       { title: 'Bus spectra (masking view)', caption: 'Where each bus sits in frequency after processing. Overlapping curves compete for the same space.', relative: false }));
     const curves = [];
@@ -732,7 +739,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
       el('thead', {}, el('tr', {}, ['Stem', 'Bus', 'Input', 'After processing', 'Compression', 'De-ess', 'Chain'].map((h) => el('th', {}, h)))),
       el('tbody', {}, rep.stems.map((s) => el('tr', { style: s.audible ? '' : 'opacity:.5' },
         el('td', {}, s.name),
-        el('td', {}, s.audible ? el('span', { class: 'tag', style: `border-color: var(${BUS_COLORS[s.category] || '--line-2'})` }, s.bus === 'vocalLead' ? 'vocal lead' : s.bus === 'vocalSupport' ? 'vocal support' : s.bus) : 'muted'),
+        el('td', {}, s.audible ? el('span', { class: 'tag', style: `border-color: var(${BUS_COLORS[s.category] || '--line-2'})` }, s.bus === 'vocalLead' ? (post ? 'dialogue' : 'vocal lead') : s.bus === 'vocalSupport' ? 'vocal support' : busFile(s.bus)) : 'muted'),
         el('td', { class: 'num' }, `${fx(s.inputLufs, 1)} LUFS`),
         el('td', { class: 'num' }, `${fx(s.processedLufs, 1)} LUFS`),
         el('td', { class: 'num' }, s.comp ? `${fx(s.comp.avgGr, 1)} / ${fx(s.comp.maxGr, 1)} dB` : '–'),
@@ -742,7 +749,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
     root.append(section('Buses', el('div', { class: 'table-wrap' }, el('table', { class: 'data' },
       el('thead', {}, el('tr', {}, ['Bus', 'Input', 'Auto balance', 'Your gain', 'In the mix', 'Glue', 'Notes'].map((h) => el('th', {}, h)))),
       el('tbody', {}, Object.entries(rep.buses).map(([k, b]) => el('tr', {},
-        el('td', {}, el('span', { style: `color: var(${BUS_COLORS[k]}); font-weight:600` }, k)),
+        el('td', {}, el('span', { style: `color: var(${BUS_COLORS[k]}); font-weight:600` }, busName(k))),
         el('td', { class: 'num' }, `${fx(b.inputLufs, 1)} LUFS`),
         el('td', { class: 'num' }, `${sx(b.autoGainDb, 1)} dB`),
         el('td', { class: 'num' }, `${sx(b.userGainDb, 1)} dB`),

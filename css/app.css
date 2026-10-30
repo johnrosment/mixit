@@ -452,6 +452,7 @@ html[data-mode="easy"] :is(#tab-mix, #tab-master) .downloads .btn:not(.in-easy),
 .stem-summary .tag { border-color: var(--c); color: var(--text); }
 
 .bus-table { display: grid; grid-template-columns: 64px repeat(3, minmax(0, 1fr)); gap: 6px 8px; align-items: center; font-size: 13px; }
+.bus-table.no-sends { grid-template-columns: 72px repeat(2, minmax(0, 1fr)); }
 .bus-table .head { color: var(--faint); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
 .bus-table .bus-name { font-weight: 700; color: var(--c); }
 .bus-table select { background: var(--card-2); border: 2px solid var(--line); padding: 3px 4px; font-size: 13px; width: 100%; }
@@ -526,6 +527,7 @@ table.data.sections select { font: inherit; padding: 3px 4px; }
   .tabs { grid-column: 1 / -1; grid-row: 2; justify-self: stretch; overflow-x: auto; scrollbar-width: none; }
   .tabs::-webkit-scrollbar { display: none; }
   .tabs button { padding: 8px 10px; font-size: 13px; }
+  .tabs button::after { left: 10px; right: 10px; }
   .logo { height: 30px; }
   .paths { grid-template-columns: minmax(0, 1fr); gap: 18px; }
   .easy-controls { grid-template-columns: minmax(0, 1fr); padding: 4px 16px 8px; }
@@ -538,4 +540,9 @@ table.data.sections select { font: inherit; padding: 3px 4px; }
   .stem-main .stem-name { grid-column: 1 / -1; }
   .empty { padding: 22px; }
   .guide { padding: 22px; }
+}
+@media (max-width: 420px) {
+  .tabs { justify-content: space-between; }
+  .tabs button { padding: 8px 4px; letter-spacing: .04em; }
+  .tabs button::after { left: 4px; right: 4px; }
 }

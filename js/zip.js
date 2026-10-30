@@ -64,6 +64,8 @@ export function makeZip(files) {
     central.push(cen);
     offset += local.length + data.length;
   }
+  // Plain ZIP offsets stop at 4 GB; past that the archive would be corrupt.
+  if (offset > 0xffffffff) throw new Error('These files add up to more than 4 GB, too big for one ZIP. Download them one at a time.');
   const cenSize = central.reduce((a, c) => a + c.length, 0);
   const end = new Uint8Array(22);
   const ev = new DataView(end.buffer);

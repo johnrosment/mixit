@@ -9,16 +9,38 @@ import { learnProfile } from './profile.js';
 
 let session = null;
 
+// Surround files (WAV / SMPTE channel order: L R C LFE, then the surrounds and
+// heights) are folded to stereo the usual way: centre, surrounds and heights
+// at -3 dB, LFE left out. Without this only L and R were used, losing the
+// centre (where dialogue lives). Orders this does not know keep L and R.
+const FOLD = {
+  3: 'L R C', 4: 'L R Ls Rs', 5: 'L R C Ls Rs', 6: 'L R C LFE Ls Rs', 7: 'L R C LFE Cs Ls Rs', 8: 'L R C LFE Ls Rs Ls Rs',
+  10: 'L R C LFE Ls Rs Ls Rs Ls Rs', 12: 'L R C LFE Ls Rs Ls Rs Ls Rs Ls Rs',
+};
+const FOLD_GAIN = { L: [1, 0], R: [0, 1], C: [Math.SQRT1_2, Math.SQRT1_2], LFE: [0, 0], Ls: [Math.SQRT1_2, 0], Rs: [0, Math.SQRT1_2], Cs: [0.5, 0.5] };
+function toStereo(audio) {
+  const map = FOLD[audio.channels.length]?.split(' ');
+  if (!map) return audio.channels.length > 2 ? { ...audio, channels: audio.channels.slice(0, 2) } : audio;
+  const n = audio.channels[0].length;
+  const out = [new Float32Array(n), new Float32Array(n)];
+  audio.channels.forEach((ch, c) => {
+    const [gl, gr] = FOLD_GAIN[map[c]];
+    if (gl) for (let i = 0; i < n; i++) out[0][i] += ch[i] * gl;
+    if (gr) for (let i = 0; i < n; i++) out[1][i] += ch[i] * gr;
+  });
+  return { sr: audio.sr, channels: out };
+}
+
 function toAudio(payload) {
   if (payload.wav) {
     const p = parseWav(payload.wav);
-    return { sr: p.sr, channels: p.channels };
+    return toStereo({ sr: p.sr, channels: p.channels });
   }
   if (payload.aiff) {
     const p = parseAiff(payload.aiff);
-    return { sr: p.sr, channels: p.channels };
+    return toStereo({ sr: p.sr, channels: p.channels });
   }
-  return payload.audio;
+  return toStereo(payload.audio);
 }
 
 function buffersOf(chs) {

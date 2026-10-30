@@ -17,6 +17,10 @@ export function el(tag, attrs = {}, ...children) {
 
 let uid = 0;
 
+// A label or help text may differ for a song and for a video, ad or podcast:
+// { song, post } shows the one that matches the project.
+const byProject = (t) => (t && typeof t === 'object' ? [el('span', { class: 'only-song' }, t.song), el('span', { class: 'only-post' }, t.post)] : t);
+
 export function formatValue(item, v) {
   if (item.format) return item.format(v);
   if (item.zeroLabel != null && Number(v) === 0) return item.zeroLabel;
@@ -34,7 +38,7 @@ function rangeControl(item, values, defaults, onChange) {
   const input = el('input', { type: 'range', id, min: item.min, max: item.max, step: item.step || 0.01 });
   input.value = values[item.key];
   const out = el('output', { class: 'val', for: id, title: 'Double-click to reset' });
-  const root = el('div', { class: 'ctl' }, el('label', { for: id }, item.label), out, input, item.help ? el('p', { class: 'help' }, item.help) : null);
+  const root = el('div', { class: 'ctl' }, el('label', { for: id }, byProject(item.label)), out, input, item.help ? el('p', { class: 'help' }, byProject(item.help)) : null);
   const show = () => {
     out.textContent = formatValue(item, values[item.key]);
     out.classList.toggle('changed', defaults && defaults[item.key] !== undefined && Number(values[item.key]) !== Number(defaults[item.key]));
@@ -55,7 +59,7 @@ function selectControl(item, values, defaults, onChange) {
   const id = `ctl-${++uid}`;
   const select = el('select', { id }, item.options.map((o) => el('option', { value: o.value }, o.label)));
   select.value = String(values[item.key]);
-  const root = el('div', { class: 'ctl' }, el('label', { for: id }, item.label), select, item.help ? el('p', { class: 'help' }, item.help) : null);
+  const root = el('div', { class: 'ctl' }, el('label', { for: id }, byProject(item.label)), select, item.help ? el('p', { class: 'help' }, byProject(item.help)) : null);
   select.addEventListener('change', () => {
     values[item.key] = item.numeric ? Number(select.value) : select.value;
     onChange(item.key, values[item.key]);
@@ -67,7 +71,7 @@ function toggleControl(item, values, defaults, onChange) {
   const id = `ctl-${++uid}`;
   const input = el('input', { type: 'checkbox', id, role: 'switch' });
   input.checked = !!values[item.key];
-  const root = el('div', { class: 'ctl' }, el('label', { for: id }, item.label), el('span', { class: 'switch' }, input, el('span')), item.help ? el('p', { class: 'help' }, item.help) : null);
+  const root = el('div', { class: 'ctl' }, el('label', { for: id }, byProject(item.label)), el('span', { class: 'switch' }, input, el('span')), item.help ? el('p', { class: 'help' }, byProject(item.help)) : null);
   input.addEventListener('change', () => { values[item.key] = input.checked; onChange(item.key, values[item.key]); });
   return { el: root, set: (v) => { input.checked = !!v; }, input };
 }
@@ -76,7 +80,7 @@ function textControl(item, values, defaults, onChange) {
   const id = `ctl-${++uid}`;
   const input = el('input', { type: 'text', id, maxlength: item.maxlength || 80, placeholder: item.placeholder || '' });
   input.value = values[item.key] || '';
-  const root = el('div', { class: 'ctl' }, el('label', { for: id }, item.label), input);
+  const root = el('div', { class: 'ctl' }, el('label', { for: id }, byProject(item.label)), input);
   input.addEventListener('input', () => { values[item.key] = input.value; onChange(item.key, values[item.key]); });
   return { el: root, set: (v) => { input.value = v || ''; }, input };
 }
@@ -124,7 +128,7 @@ export function buildEasy(root, items, values, onChange) {
       const select = el('select', { id }, item.options.map((o) => el('option', { value: o.value }, o.label)));
       select.value = values[item.key];
       select.addEventListener('change', () => { values[item.key] = select.value; onChange(item.key, select.value); });
-      root.append(el('div', { class: 'easy-ctl easy-select' }, el('label', { for: id }, item.label), el('span'), el('p', { class: 'help' }, item.help), select));
+      root.append(el('div', { class: 'easy-ctl easy-select' }, el('label', { for: id }, byProject(item.label)), el('span'), el('p', { class: 'help' }, item.help), select));
       refs[item.key] = { input: select, show: () => {} };
       continue;
     }
@@ -135,7 +139,7 @@ export function buildEasy(root, items, values, onChange) {
     input.addEventListener('input', () => { values[item.key] = Number(input.value); show(); onChange(item.key, values[item.key]); });
     out.addEventListener('dblclick', () => { values[item.key] = item.def; input.value = item.def; show(); onChange(item.key, item.def); });
     show();
-    root.append(el('div', { class: 'easy-ctl' }, el('label', { for: id }, item.label), out, el('p', { class: 'help' }, item.help), input,
+    root.append(el('div', { class: 'easy-ctl' }, el('label', { for: id }, byProject(item.label)), out, el('p', { class: 'help' }, item.help), input,
       el('div', { class: 'ends', 'aria-hidden': 'true' }, el('span', {}, item.ends[0]), el('span', {}, item.ends[1]))));
     refs[item.key] = { input, show };
   }
