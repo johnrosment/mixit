@@ -19,6 +19,7 @@ export const GUIDE_HTML = `
 <p>On the Mix page, switch <b>Song</b> to <b>Video, ad or podcast</b>. Stems are then sorted into <b>dialogue</b>, <b>music</b>, <b>effects</b> and <b>ambience</b> (names like "VO", "host", "dx", "SFX", "foley" or "room tone" are recognised).</p>
 <ul>
   <li><b>Dialogue first.</b> Each voice is cleaned up, its quiet and loud phrases are evened out, and every speaker is brought to the same level before anything else is added. Song-style warmth, chorus and pitch work are left off.</li>
+  <li><b>Clean edits.</b> Mouth clicks, ticks and pops are taken out of dialogue, effects and ambience, and every place one of them starts or stops gets a short fade (1 frame unless you change it in Advanced), so no edit clicks. Words and hits keep their attack.</li>
   <li><b>Music, effects and ambience make room.</b> They step back while someone speaks and come back up in the pauses; the music also clears the range the words live in.</li>
   <li><b>Made for.</b> Pick where it's going: online video (-14 LUFS), podcast (-16), TV in Europe (EBU R128, -23, peaks -1) or TV in the US (ATSC A/85, -24, peaks -2). These are common targets; always check the spec from your broadcaster, platform or client.</li>
   <li><b>Delivery check.</b> The result lists whether loudness and peaks are within the standard, any dead air (silence of 2 seconds or more), and how even the voices are.</li>

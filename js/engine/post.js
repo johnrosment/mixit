@@ -4,7 +4,7 @@
 // the dialogue is).
 
 import { hopEnergies } from './loudness.js';
-import { lr4Split3 } from './filters.js';
+import { lr4Split3, zeroPhaseLowpass } from './filters.js';
 
 // Common delivery targets. Specs differ by broadcaster and platform, so the
 // report always says to check the one you deliver to.
@@ -14,6 +14,9 @@ export const DELIVERY = {
   'tv-eu': { label: 'TV, Europe (EBU R128)', lufs: -23, ceiling: -1, tolerance: 0.5 },
   'tv-us': { label: 'TV, US (ATSC A/85)', lufs: -24, ceiling: -2, tolerance: 2 },
 };
+
+// Frame rates for edit fades: film, PAL, NTSC and web video.
+export const FRAME_RATES = { '23.976': 24000 / 1001, 24: 24, 25: 25, '29.97': 30000 / 1001, 30: 30 };
 
 const db = (e) => (e > 1e-12 ? -0.691 + 10 * Math.log10(e) : -120);
 const pctl = (arr, p) => { const v = [...arr].sort((a, b) => a - b); return v.length ? v[Math.min(v.length - 1, Math.floor(p * v.length))] : -120; };
@@ -74,6 +77,117 @@ export function levelSpeech(chs, sr, { amount = 0.6, maxDb = 9 } = {}) {
     spreadAfterDb: pctl(act, 0.9) - pctl(act, 0.1),
     maxBoostDb: Math.max(0, ...g), maxCutDb: -Math.min(0, ...g),
   };
+}
+
+/**
+ * Mouth clicks and ticks in dialogue: bursts under 3 ms in the band above
+ * 2.5 kHz that stand well above everything else within 15 ms either side
+ * (so the regular pulses of a voice are not taken for clicks). A burst that
+ * starts a sound (much more energy just after than just before, as in "t" or
+ * "k") is left alone. Only the upper band is dipped, down to the level around
+ * the click, so the voice underneath is untouched.
+ */
+export function mouthDeclick(chs, sr, { sensitivity = 0.5 } = {}) {
+  const n = chs[0].length;
+  const mono = new Float32Array(n);
+  for (const ch of chs) for (let i = 0; i < n; i++) mono[i] += ch[i] / chs.length;
+  const low = zeroPhaseLowpass(mono, 2500, sr);
+  const hop = Math.max(1, Math.round(sr * 0.00025));
+  const H = Math.floor(n / hop);
+  const env = new Float32Array(H);
+  for (let j = 0; j < H; j++) {
+    let p = 0;
+    for (let i = j * hop; i < (j + 1) * hop; i++) { const v = Math.abs(mono[i] - low[i]); if (v > p) p = v; }
+    env[j] = p;
+  }
+  const ratio = Math.pow(10, (14 - 8 * Math.max(0, Math.min(1, sensitivity))) / 20); // 14 dB above at 0, 6 dB at 1
+  const W = Math.round((0.015 * sr) / hop), X = Math.round((0.0015 * sr) / hop), maxLen = Math.round((0.003 * sr) / hop);
+  const pre = new Float64Array(H + 1);
+  for (let j = 0; j < H; j++) pre[j + 1] = pre[j] + env[j];
+  const ms = (t) => Math.round(t * 0.001 * sr);
+  const energy = (a, b) => { let s = 0; for (let i = Math.max(0, a); i < Math.min(n, b); i++) s += mono[i] * mono[i]; return s; };
+  const events = [];
+  for (let j = 0; j < H; j++) {
+    const lo = Math.max(0, j - W), hi = Math.min(H, j + W + 1);
+    if (env[j] < 3e-4 || env[j] < (3 * (pre[hi] - pre[lo])) / (hi - lo)) continue; // quick gate: under -70 dBFS or under 3x the local average
+    // Reference: the loudest moment of the band within 15 ms, the click itself
+    // left out, so a voice's own pulses (every 4-12 ms) never stand out.
+    let ref = 0;
+    for (let k = lo; k < hi; k++) if ((k < j - X || k > j + maxLen + X) && env[k] > ref) ref = env[k];
+    if (env[j] < ratio * ref) continue;
+    let b = j, peak = env[j];
+    while (b + 1 < H && env[b + 1] > ratio * ref) { b++; if (env[b] > peak) peak = env[b]; }
+    if (b - j + 1 <= maxLen) {
+      const s0 = j * hop, s1 = (b + 1) * hop;
+      if (energy(s1 + ms(2), s1 + ms(20)) <= 4 * energy(s0 - ms(20), s0 - ms(2)) + 1e-9) events.push({ s0, s1, g: Math.max(0.05, ref / peak) });
+    }
+    j = b;
+  }
+  // Repair: subtract part of the upper band over the click, with 0.5 ms ramps.
+  const r = ms(0.5), pad = ms(10);
+  for (const { s0, s1, g } of events) {
+    const a = Math.max(0, s0 - r), b = Math.min(n, s1 + r);
+    const p0 = Math.max(0, a - pad), p1 = Math.min(n, b + pad);
+    for (const ch of chs) {
+      const seg = ch.slice(p0, p1);
+      const segLow = zeroPhaseLowpass(seg, 2500, sr);
+      for (let i = a; i < b; i++) {
+        const t = i < s0 ? (i - a) / Math.max(1, s0 - a) : i >= s1 ? (b - i) / Math.max(1, b - s1) : 1;
+        const w = 1 - (1 - g) * (0.5 - 0.5 * Math.cos(Math.PI * t));
+        ch[i] -= (1 - w) * (seg[i - p0] - segLow[i - p0]);
+      }
+    }
+  }
+  return { count: events.length, times: events.slice(0, 200).map((e) => e.s0 / sr) };
+}
+
+/**
+ * Fades on every edit: wherever a sound starts out of digital silence or stops
+ * into it, including the very start and end of the file. `frames` is the fade
+ * length in video frames at `fps`. Tails always get the full fade. A head gets
+ * the full fade only when its first frame is quiet (room tone or a breath
+ * before the word); a head that starts right on a word or a hit gets a 2-4 ms
+ * fade that stops the click and keeps the attack. Ambience always fades fully.
+ * In dialogue, a lone blip under 3 ms surrounded by silence is a click and is
+ * removed; in effects, sounds under 10 ms are left alone (a tick on purpose).
+ */
+export function fadeEdits(chs, sr, { frames = 1, fps = FRAME_RATES['29.97'], kind = 'dialogue' } = {}) {
+  const n = chs[0].length;
+  const L = Math.max(1, Math.round((frames / fps) * sr));
+  const shortHead = Math.min(L, Math.round((kind === 'effects' ? 0.002 : 0.004) * sr));
+  const thr = 1e-4; // -80 dBFS: anything quieter counts as silence
+  const gap = Math.round(0.01 * sr); // at least 10 ms of it between two sounds
+  const loudAt = (i) => { for (const ch of chs) if (ch[i] > thr || ch[i] < -thr) return true; return false; };
+  const regions = [];
+  let start = -1, last = -1;
+  for (let i = 0; i < n; i++) {
+    if (loudAt(i)) { if (start < 0) start = i; last = i; } else if (start >= 0 && i - last >= gap) { regions.push([start, last + 1]); start = -1; }
+  }
+  if (start >= 0) regions.push([start, last + 1]);
+  const peak = (a, b) => { let p = 0; for (const ch of chs) for (let i = a; i < b; i++) { const v = ch[i] < 0 ? -ch[i] : ch[i]; if (v > p) p = v; } return p; };
+  const hardEdge = (i) => chs.some((ch) => Math.abs(ch[i]) > 1e-3); // would click (above -60 dBFS)
+  const ramp = (a, len, up) => {
+    for (let i = 0; i < len; i++) {
+      const g = 0.5 - 0.5 * Math.cos((Math.PI * (i + 0.5)) / len);
+      for (const ch of chs) ch[a + i] *= up ? g : 1 - g;
+    }
+  };
+  let fades = 0, hard = 0, blips = 0;
+  for (const [s, e] of regions) {
+    const len = e - s;
+    if (kind === 'dialogue' && len < 0.003 * sr && s >= gap && n - e >= gap) { for (const ch of chs) ch.fill(0, s, e); blips++; continue; }
+    if (kind === 'effects' && len < 0.01 * sr) continue;
+    const half = Math.max(1, len >> 1);
+    let head = Math.min(L, half);
+    if (kind !== 'ambience' && peak(s, s + head) > 0.03 * peak(s, e)) head = Math.min(head, shortHead);
+    const tail = Math.min(L, half);
+    if (hardEdge(s)) hard++;
+    if (hardEdge(e - 1)) hard++;
+    ramp(s, head, true);
+    ramp(e - tail, tail, false);
+    fades += 2;
+  }
+  return { regions: regions.length, fades, hard, blips, fadeMs: (1000 * L) / sr };
 }
 
 /**

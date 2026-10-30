@@ -38,6 +38,7 @@ account to make and nothing to install.
 ### Videos, ads and podcasts
 - Switch the Mix page to **Video, ad or podcast** and drop dialogue, music, effects and ambience.
 - Voices are cleaned, evened out and matched; music, effects and ambience step back while someone speaks.
+- Clicks are taken out of dialogue, effects and ambience, and every edit gets a short fade (½, 1 or 2 frames).
 - Pick where it's going (online video, podcast, TV in Europe or the US) and get a delivery check:
   loudness and peaks against the standard, dead air, and how even the voices are.
 

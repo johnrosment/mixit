@@ -14,8 +14,8 @@ import { tuneVocal, SCALES } from './pitch.js';
 import { detectSections, sectionMoves, sectionCurve } from './sections.js';
 import { roughFeatures, stemFeatures, addFeatures, fitBalance } from './roughmix.js';
 import { lowCutFreq, resonantCuts } from './stemtools.js';
-import { levelSpeech, duckUnderSpeech, deliveryCheck } from './post.js';
-import { denoise } from './repair.js';
+import { levelSpeech, duckUnderSpeech, deliveryCheck, fadeEdits, mouthDeclick, FRAME_RATES } from './post.js';
+import { denoise, detectClicks, repairClicks } from './repair.js';
 
 export const BUS_KEYS = ['vocals', 'drums', 'bass', 'music', 'fx', 'ambience'];
 
@@ -26,6 +26,8 @@ const BUS_TARGETS = { vocals: -18, drums: -20, bass: -21, music: -19.5, fx: -27,
 const POST_TARGETS = { vocals: -20, drums: -27, bass: -27, music: -25, fx: -26, ambience: -32 };
 const VOICE_LUFS = -24; // each voice is brought to this before the bus, so speakers match
 const SUPPORT_OFFSET = -6; // doubles/backing relative to lead vocal
+// Video, ad and podcast stems that get click removal and edit fades.
+const EDIT_KINDS = { vocals: 'dialogue', fx: 'effects', ambience: 'ambience' };
 
 const TONES = {
   neutral: [],
@@ -113,6 +115,7 @@ export class MixSession {
     this.rawSum = stereoBuf(length);
     this.stemReports = [];
     this.anySolo = settings.stems.some((st) => st.solo && !st.mute);
+    this.edits = { clicks: 0, fades: 0, hard: 0, blips: 0 };
     // Pitch-correction key: fixed, chromatic, or detected from the first tuned vocal and reused.
     const k = settings.tuneKey || 'auto';
     this.tuneKey = k === 'auto' ? null : k === 'chromatic' ? { root: 0, scale: 'chromatic' } : { root: Number(k.split(':')[0]), scale: k.split(':')[1] };
@@ -139,6 +142,27 @@ export class MixSession {
     if (audible) addInto(this.rawSum, chs, 1);
     if (st.polarity) for (const ch of chs) for (let i = 0; i < n; i++) ch[i] = -ch[i];
     const post = this.s.mode === 'post';
+    // Edit clean-up first, before anything reacts to the clicks: ticks and pops
+    // rebuilt from the sound around them (crackles that repeat, and hits, are
+    // left alone), mouth clicks in dialogue dipped in the upper band, then a
+    // fade on every place a sound starts or stops.
+    const kind = post && audible ? EDIT_KINDS[st.category] : null;
+    const declick = this.s.declick ?? 0.5;
+    if (kind && declick > 0.01) {
+      const det = detectClicks(chs, sr, { sensitivity: 0.5 * declick });
+      if (det.count) repairClicks(chs, sr, det);
+      const mouth = kind === 'dialogue' ? mouthDeclick(chs, sr, { sensitivity: declick }).count : 0;
+      const count = det.count + mouth;
+      if (count) row.steps.push(`${count} click${count === 1 ? '' : 's'} removed${mouth ? ` (${mouth} mouth click${mouth === 1 ? '' : 's'})` : ''}`);
+      this.edits.clicks += count;
+    }
+    const frames = Number(this.s.editFades ?? 1);
+    if (kind && frames > 0) {
+      const f = fadeEdits(chs, sr, { frames, fps: FRAME_RATES[this.s.frameRate] || FRAME_RATES['29.97'], kind });
+      if (f.fades) row.steps.push(`Fades on ${f.fades / 2} sound${f.fades === 2 ? '' : 's'} (${f.fadeMs.toFixed(0)} ms${f.hard ? `; ${f.hard} hard cut${f.hard === 1 ? '' : 's'} smoothed` : ''})`);
+      if (f.blips) row.steps.push(`${f.blips} stray click${f.blips === 1 ? '' : 's'} in the silence removed`);
+      this.edits.fades += f.fades; this.edits.hard += f.hard; this.edits.blips += f.blips;
+    }
     if (post && st.category === 'vocals' && audible && (this.s.dialogueDenoise || 0) > 0.01) {
       const r = denoise(chs, sr, { amount: this.s.dialogueDenoise });
       if (r.report.applied) { chs[0].set(r.chs[0]); chs[1].set(r.chs[1]); row.steps.push(`Background noise lowered (average ${r.report.avgReductionDb.toFixed(1)} dB)`); } else row.steps.push(`Noise reduction skipped: ${r.report.reason}`);
@@ -639,6 +663,7 @@ export class MixSession {
     progress('Analysing the mix', 0.85);
     const analysis = analyze({ sr, channels: out }, { progress: (st, f) => progress(`Analysing: ${st}`, 0.85 + f * 0.08) });
     const delivery = post ? deliveryCheck(out, used.vocals ? buses.vocals : null, sr, { standard: s.delivery, achievedLufs: analysis.loudness.integrated, truePeakDbtp: analysis.peak.truePeakDbtp }) : null;
+    if (delivery) delivery.edits = { ...this.edits, frames: Number(s.editFades ?? 1), frameRate: s.frameRate || '29.97', declick: s.declick ?? 0.5 };
 
     // Per-bus spectra (after processing, before the output stage) for the masking view.
     progress('Bus spectra', 0.94);

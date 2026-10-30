@@ -53,7 +53,7 @@ export const MIX_DEFAULTS = {
   bitDepth: 24, dither: 'tpdf', outputRate: 0, renderBusStems: true,
   spatial: 'off', spatialCentre: 0.6, spatialLfe: -12,
   tuneKey: 'auto', sectionAuto: 0,
-  project: 'song', delivery: 'web', dialogueLeveler: 0.6, dialogueDenoise: 0, matchVoices: true, musicDuck: 6, musicCarve: 3, sfxDuck: 2, ambDuck: 3, dialogueRoom: 0,
+  project: 'song', delivery: 'web', dialogueLeveler: 0.6, dialogueDenoise: 0, matchVoices: true, musicDuck: 6, musicCarve: 3, sfxDuck: 2, ambDuck: 3, dialogueRoom: 0, declick: 0.5, editFades: '1', frameRate: '29.97',
   vocalChorus: 0.06, drumParallel: 0.3, drumDrive: 0.35, bassGrit: 0.3, delaySync: true, musicCleanup: true, alternates: false,
 };
 
@@ -69,12 +69,17 @@ const STYLES = {
 const pct = (v) => `${Math.round(v * 100)}%`;
 const offPct = (v) => (v ? pct(v) : 'Off');
 const DELIVERY_OPTIONS = Object.entries(DELIVERY).map(([value, d]) => ({ value, label: `${d.label}: ${d.lufs} LUFS, peaks ${d.ceiling} dBTP` }));
+const FADE_OPTIONS = [['0', 'Off'], ['0.5', '½ frame'], ['1', '1 frame'], ['2', '2 frames']].map(([value, label]) => ({ value, label }));
+const FPS_OPTIONS = [['23.976', '23.976 fps (film)'], ['24', '24 fps'], ['25', '25 fps (TV, Europe)'], ['29.97', '29.97 fps (TV, US)'], ['30', '30 fps']].map(([value, label]) => ({ value, label }));
 const SCHEMA = [
   { title: 'Video, ad or podcast', only: 'post', open: true, items: [
     { key: 'delivery', label: 'Made for', type: 'select', options: DELIVERY_OPTIONS, help: 'Sets the loudness and peak limit. These are common targets; always check your broadcaster’s or platform’s own delivery spec.' },
     { key: 'dialogueLeveler', label: 'Even out the voices', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'Rides quiet and loud phrases toward each voice’s usual level.' },
     { key: 'matchVoices', label: 'Match speakers', type: 'toggle', help: 'Brings every dialogue stem to the same loudness first, so no speaker is too quiet.' },
     { key: 'dialogueDenoise', label: 'Clean up background noise', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'Lowers steady hiss, hum-free room noise and air conditioning under the voices.' },
+    { key: 'declick', label: 'Remove clicks', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'Takes out mouth clicks, ticks and pops in dialogue, effects and ambience. Hits, and crackles that repeat (fire, rain), are left alone.' },
+    { key: 'editFades', label: 'Fades on edits', type: 'select', options: FADE_OPTIONS, help: 'A short fade wherever dialogue, effects or ambience start or stop, so no edit clicks. Words and hits keep their attack.' },
+    { key: 'frameRate', label: 'Video frame rate', type: 'select', options: FPS_OPTIONS, help: 'Sets how long a frame is for the fades. Match your video.' },
     { key: 'dialogueRoom', label: 'Room on the voices', type: 'range', min: 0, max: 0.5, step: 0.05, format: offPct, help: 'A small, short room. Leave off for voice-over.' },
     { key: 'musicDuck', label: 'Music under the voices', type: 'range', min: 0, max: 15, step: 0.5, unit: ' dB', zeroLabel: 'Off', help: 'How far the music drops while someone speaks; it swells back up in pauses.' },
     { key: 'musicCarve', label: 'Clear room for the words', type: 'range', min: 0, max: 6, step: 0.5, unit: ' dB', zeroLabel: 'Off', help: 'An extra dip in the music where speech lives (1-4 kHz).' },
@@ -190,7 +195,7 @@ const EASY_POST_DEFAULTS = { clarity: 0, even: 0.6, clean: 0, music: 0, under: 0
 const EASY_POST = [
   { key: 'clarity', label: 'Voice clarity', help: 'How crisp and present the voices sound.', min: -1, max: 1, def: 0, ends: ['Soft', 'Crisp'], show: (v) => easyWords(v, { lo: 'Softer', hi: 'Crisper', off: '' }) },
   { key: 'even', label: 'Even out the voices', help: 'Smooths quiet and loud phrases.', min: 0, max: 1, def: 0.6, ends: ['Leave', 'Very even'], show: offPct },
-  { key: 'clean', label: 'Clean up noise', help: 'Lowers hiss and room noise under the voices.', min: 0, max: 1, def: 0, ends: ['Off', 'Strong'], show: offPct },
+  { key: 'clean', label: 'Clean up', help: 'Lowers hiss and room noise, and takes out clicks.', min: 0, max: 1, def: 0, ends: ['Off', 'Strong'], show: offPct },
   { key: 'music', label: 'Music level', help: 'How loud the music is overall.', min: -1, max: 1, def: 0, ends: ['Quieter', 'Louder'], show: (v) => easyWords(v, { lo: 'Quieter', hi: 'Louder', off: '' }) },
   { key: 'under', label: 'Music under the voices', help: 'How far the music drops while someone speaks.', min: 0, max: 1, def: 0.5, ends: ['A little', 'A lot'], show: (v) => `${(3 + 9 * v).toFixed(1)} dB` },
   { key: 'fx', label: 'Effects level', help: 'How loud the sound effects are.', min: -1, max: 1, def: 0, ends: ['Quieter', 'Louder'], show: (v) => easyWords(v, { lo: 'Quieter', hi: 'Louder', off: '' }) },
@@ -207,7 +212,7 @@ function easyPostValues(e) {
   return {
     values: {
       ...MIX_DEFAULTS, project: 'post', delivery: e.delivery,
-      vocalPresence: q(0.55 + 0.18 * e.clarity, 0.01), dialogueLeveler: e.even, dialogueDenoise: e.clean,
+      vocalPresence: q(0.55 + 0.18 * e.clarity, 0.01), dialogueLeveler: e.even, dialogueDenoise: e.clean, declick: q(0.5 + 0.5 * e.clean, 0.05),
       musicDuck: q(3 + 9 * e.under, 0.5), musicCarve: q(1.5 + 3 * e.under, 0.5), renderBusStems: true, spatial: 'off',
     },
     buses,
@@ -308,7 +313,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
 
   const styleChips = chipGroup($('x-styles'), Object.entries(STYLES).map(([k, s]) => [k, s.label]), state.style, (key) => {
     state.style = key;
-    const keep = Object.fromEntries(['project', 'delivery', 'dialogueLeveler', 'dialogueDenoise', 'matchVoices', 'musicDuck', 'musicCarve', 'sfxDuck', 'ambDuck', 'dialogueRoom', 'bitDepth', 'dither', 'outputRate', 'renderBusStems', 'outputMode', 'headroom', 'targetLufs', 'ceiling', 'spatial', 'spatialCentre', 'spatialLfe'].map((k) => [k, state.values[k]]));
+    const keep = Object.fromEntries(['project', 'delivery', 'dialogueLeveler', 'dialogueDenoise', 'matchVoices', 'musicDuck', 'musicCarve', 'sfxDuck', 'ambDuck', 'dialogueRoom', 'declick', 'editFades', 'frameRate', 'bitDepth', 'dither', 'outputRate', 'renderBusStems', 'outputMode', 'headroom', 'targetLufs', 'ceiling', 'spatial', 'spatialCentre', 'spatialLfe'].map((k) => [k, state.values[k]]));
     Object.assign(state.values, MIX_DEFAULTS, STYLES[key].set, keep);
     state.buses = structuredClone(BUS_DEFAULTS);
     for (const [b, o] of Object.entries(STYLES[key].buses)) Object.assign(state.buses[b], o);
@@ -555,6 +560,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
     return {
       ...s, mode: 'post', delivery: v.delivery, dialogueLeveler: v.dialogueLeveler, dialogueDenoise: v.dialogueDenoise, matchVoices: v.matchVoices,
       musicDuck: v.musicDuck, musicCarve: v.musicCarve, sfxDuck: v.sfxDuck, ambDuck: v.ambDuck,
+      declick: v.declick, editFades: v.editFades, frameRate: v.frameRate,
       outputMode: 'loudness', targetLufs: d.lufs, ceiling: d.ceiling, riderStrength: 0, sectionAuto: 0, alternates: false,
       buses, reverb: { enabled: (v.dialogueRoom || 0) > 0.01, kind: 'room', decay: 0.6, predelay: 10, level: -16 }, delay: { enabled: false },
       vocalChorus: 0, mixTape: 0, mixGlue: Math.min(v.mixGlue, 0.15),
@@ -778,13 +784,21 @@ export function initMix({ engine, sendToMaster, onMode }) {
 
   // Pass/check list against the delivery standard, plus dead air and how even the voices are.
   function deliverySection(d) {
-    const row = (ok, text) => el('li', {}, el('span', { class: `mark ${ok ? 'pass' : 'check'}` }, ok ? 'Pass' : 'Check'), el('span', {}, text));
+    const row = (ok, text, mark = ok ? 'Pass' : 'Check') => el('li', {}, el('span', { class: `mark ${ok ? 'pass' : 'check'}` }, mark), el('span', {}, text));
     const items = [];
     if (d.targetLufs != null) {
       items.push(row(d.loudnessOk, `Loudness ${fx(d.achievedLufs, 1)} LUFS (target ${d.targetLufs}, within ${d.tolerance})`));
       items.push(row(d.peakOk, `Peaks ${fx(d.truePeakDbtp, 1)} dBTP (at most ${d.ceiling})`));
     }
     items.push(row(!d.deadAir.length, d.deadAir.length ? `Silence of 2 s or more at ${d.deadAir.map((x) => `${fmtT(x.start)}–${fmtT(x.end)}`).join(', ')}` : 'No dead air (no silence of 2 s or more)'));
+    const e = d.edits;
+    if (e && (e.fades || e.clicks || e.blips)) {
+      const parts = [];
+      if (e.fades) parts.push(`fades on ${e.fades / 2} sound${e.fades === 2 ? '' : 's'} (${e.frames === 0.5 ? '½' : e.frames} frame${e.frames > 1 ? 's' : ''} at ${e.frameRate} fps${e.hard ? `, ${e.hard} hard cut${e.hard === 1 ? '' : 's'} smoothed` : ''})`);
+      const clicks = e.clicks + e.blips;
+      if (clicks) parts.push(`${clicks} click${clicks === 1 ? '' : 's'} removed`);
+      items.push(row(true, `Edits cleaned: ${parts.join('; ')}`, 'Done'));
+    }
     if (d.voice) items.push(row(d.voice.spreadDb <= 6, `Voices stay within ${fx(d.voice.spreadDb, 1)} dB phrase to phrase${d.voice.spreadDb > 6 ? '; try more “Even out the voices”' : ''}`));
     return section(`Delivery check: ${d.label}`, el('ul', { class: 'check-list' }, items),
       el('p', { class: 'hint' }, 'These are common targets. Always check the delivery spec from your broadcaster, platform or client.'));
