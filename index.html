@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-mode="easy">
+<html lang="en" data-mode="easy" data-project="song">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -59,6 +59,10 @@
   <!-- MIX -->
   <section class="tab" id="tab-mix" role="tabpanel" aria-labelledby="tab-btn-mix" hidden>
     <div class="page-bar">
+      <div class="project-switch" role="radiogroup" aria-label="What are you mixing?">
+        <button type="button" role="radio" aria-checked="true" data-project="song">Song</button>
+        <button type="button" role="radio" aria-checked="false" data-project="post">Video, ad or podcast</button>
+      </div>
       <div class="mode-switch" role="radiogroup" aria-label="Detail level">
         <button type="button" role="radio" aria-checked="true" data-mode="easy">Easy</button>
         <button type="button" role="radio" aria-checked="false" data-mode="advanced">Advanced</button>

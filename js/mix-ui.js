@@ -10,14 +10,20 @@ import { encodeMp3, mp3Bitrate, mp3SizeMb } from './mp3.js';
 import { chart, legend } from './charts.js';
 import { NOTE_NAMES, noteName } from './engine/pitch.js';
 import { LAYOUTS } from './engine/spatial.js';
+import { DELIVERY } from './engine/post.js';
 import {
   fx, sx, metricsTable, kpis, loudnessChart, spectrumChart, correlationChart, gainReductionChart,
   callouts, section, downloadsRow, toJson, loudnessCsv, chartCard, curveChart,
 } from './report.js';
 
-const CATEGORIES = [['vocals', 'Vocals'], ['drums', 'Drums'], ['bass', 'Bass'], ['music', 'Music'], ['fx', 'FX']];
+// A song has vocals, drums, bass, music and FX; a video, ad or podcast has
+// dialogue, music, effects and ambience (the engine keys stay the same).
+const SONG_CATEGORIES = [['vocals', 'Vocals'], ['drums', 'Drums'], ['bass', 'Bass'], ['music', 'Music'], ['fx', 'FX']];
+const POST_CATEGORIES = [['vocals', 'Dialogue'], ['music', 'Music'], ['fx', 'Effects'], ['ambience', 'Ambience']];
+let project = 'song';
+const categories = () => (project === 'post' ? POST_CATEGORIES : SONG_CATEGORIES);
 const ROLES = [['lead', 'Lead'], ['double', 'Double'], ['double_left', 'Double L'], ['double_right', 'Double R'], ['backing', 'Backing'], ['adlib', 'Ad-lib']];
-const BUS_COLORS = { vocals: '--c-vocals', drums: '--c-drums', bass: '--c-bass', music: '--c-music', fx: '--c-fx' };
+const BUS_COLORS = { vocals: '--c-vocals', drums: '--c-drums', bass: '--c-bass', music: '--c-music', fx: '--c-fx', ambience: '--c-amb' };
 
 const STEM_DEFAULTS = {
   vocals: { hpf: 80, comp: 0.5, compMode: 'smooth', deess: true, width: 1, monoBass: false, tune: 0, tuneSpeed: 40 },
@@ -25,6 +31,7 @@ const STEM_DEFAULTS = {
   bass: { hpf: 25, comp: 0.45, compMode: 'smooth', deess: false, width: 0.6, monoBass: true },
   music: { hpf: 35, comp: 0.15, compMode: 'smooth', deess: false, width: 1, monoBass: true },
   fx: { hpf: 40, comp: 0.15, compMode: 'smooth', deess: false, width: 1, monoBass: false },
+  ambience: { hpf: 40, comp: 0, compMode: 'smooth', deess: false, width: 1, monoBass: false },
 };
 
 const BUS_DEFAULTS = {
@@ -33,6 +40,7 @@ const BUS_DEFAULTS = {
   bass: { gain: 0, glue: 0.1, tone: 'neutral', width: 1, sendReverb: 0, sendDelay: 0 },
   music: { gain: 0, glue: 0.08, tone: 'neutral', width: 1, sendReverb: 0.1, sendDelay: 0.05 },
   fx: { gain: 0, glue: 0, tone: 'neutral', width: 1, sendReverb: 0.15, sendDelay: 0.1 },
+  ambience: { gain: 0, glue: 0, tone: 'neutral', width: 1, sendReverb: 0, sendDelay: 0 },
 };
 
 export const MIX_DEFAULTS = {
@@ -45,6 +53,7 @@ export const MIX_DEFAULTS = {
   bitDepth: 24, dither: 'tpdf', outputRate: 0, renderBusStems: true,
   spatial: 'off', spatialCentre: 0.6, spatialLfe: -12,
   tuneKey: 'auto', sectionAuto: 0,
+  project: 'song', delivery: 'web', dialogueLeveler: 0.6, dialogueDenoise: 0, matchVoices: true, musicDuck: 6, musicCarve: 3, sfxDuck: 2, ambDuck: 3, dialogueRoom: 0,
   vocalChorus: 0.06, drumParallel: 0.3, drumDrive: 0.35, bassGrit: 0.3, delaySync: true, musicCleanup: true, alternates: false,
 };
 
@@ -59,17 +68,29 @@ const STYLES = {
 
 const pct = (v) => `${Math.round(v * 100)}%`;
 const offPct = (v) => (v ? pct(v) : 'Off');
+const DELIVERY_OPTIONS = Object.entries(DELIVERY).map(([value, d]) => ({ value, label: `${d.label}: ${d.lufs} LUFS, peaks ${d.ceiling} dBTP` }));
 const SCHEMA = [
+  { title: 'Video, ad or podcast', only: 'post', open: true, items: [
+    { key: 'delivery', label: 'Made for', type: 'select', options: DELIVERY_OPTIONS, help: 'Sets the loudness and peak limit. These are common targets; always check your broadcaster’s or platform’s own delivery spec.' },
+    { key: 'dialogueLeveler', label: 'Even out the voices', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'Rides quiet and loud phrases toward each voice’s usual level.' },
+    { key: 'matchVoices', label: 'Match speakers', type: 'toggle', help: 'Brings every dialogue stem to the same loudness first, so no speaker is too quiet.' },
+    { key: 'dialogueDenoise', label: 'Clean up background noise', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'Lowers steady hiss, hum-free room noise and air conditioning under the voices.' },
+    { key: 'dialogueRoom', label: 'Room on the voices', type: 'range', min: 0, max: 0.5, step: 0.05, format: offPct, help: 'A small, short room. Leave off for voice-over.' },
+    { key: 'musicDuck', label: 'Music under the voices', type: 'range', min: 0, max: 15, step: 0.5, unit: ' dB', zeroLabel: 'Off', help: 'How far the music drops while someone speaks; it swells back up in pauses.' },
+    { key: 'musicCarve', label: 'Clear room for the words', type: 'range', min: 0, max: 6, step: 0.5, unit: ' dB', zeroLabel: 'Off', help: 'An extra dip in the music where speech lives (1-4 kHz).' },
+    { key: 'sfxDuck', label: 'Effects under the voices', type: 'range', min: 0, max: 8, step: 0.5, unit: ' dB', zeroLabel: 'Off', help: 'Effects step back a little while someone speaks.' },
+    { key: 'ambDuck', label: 'Ambience under the voices', type: 'range', min: 0, max: 10, step: 0.5, unit: ' dB', zeroLabel: 'Off', help: 'Room tone and backgrounds sink a little under speech.' },
+  ] },
   { title: 'Balance', open: true, items: [
     { key: 'autoBalance', label: 'Even out the levels', type: 'toggle', help: 'Balances vocals, drums, bass and music before your own moves. With a rough mix loaded, its balance is used instead.' },
     { key: 'balanceAmount', label: 'How much to even out', type: 'range', min: 0, max: 1, step: 0.05, format: pct, help: 'Lower keeps more of the levels your stems came in with.' },
     { key: 'roughTone', label: 'Lean toward your rough mix’s tone', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'Gently moves the final tone toward your rough mix.' },
     { key: 'vocalLevel', label: 'Vocal level', type: 'range', min: -12, max: 12, step: 0.5, unit: ' dB', signed: true, help: 'Turns the whole vocal up or down.' },
     { key: 'vocalPresence', label: 'Vocal clarity', type: 'range', min: 0, max: 1, step: 0.05, format: pct, help: 'Above 50% is crisper; below is softer.' },
-    { key: 'riderStrength', label: 'Keep the vocal steady', type: 'range', min: 0, max: 1, step: 0.05, format: (v) => (v ? `±${(4 * v).toFixed(1)} dB` : 'Off'), help: 'Keeps the vocal at the same level over quiet and loud parts.' },
-    { key: 'riderWindow', label: 'How quickly it rides', type: 'range', min: 0.5, max: 4, step: 0.1, unit: ' s', help: 'Shorter reacts faster; longer is smoother.' },
+    { key: 'riderStrength', only: 'song', label: 'Keep the vocal steady', type: 'range', min: 0, max: 1, step: 0.05, format: (v) => (v ? `±${(4 * v).toFixed(1)} dB` : 'Off'), help: 'Keeps the vocal at the same level over quiet and loud parts.' },
+    { key: 'riderWindow', only: 'song', label: 'How quickly it rides', type: 'range', min: 0.5, max: 4, step: 0.1, unit: ' s', help: 'Shorter reacts faster; longer is smoother.' },
   ] },
-  { title: 'Groove and low end', items: [
+  { title: 'Groove and low end', only: 'song', items: [
     { key: 'transientEnergy', label: 'Drum punch', type: 'range', min: 0, max: 1, step: 0.05, format: (v) => (Math.abs(v - 0.5) < 0.01 ? 'Neutral' : `${v > 0.5 ? '+' : '−'}${pct(Math.abs(v - 0.5) * 2)}`), help: 'Snappier drum hits, or softer below neutral.' },
     { key: 'bassTightness', label: 'Bass tightness', type: 'range', min: 0, max: 1, step: 0.05, format: pct, help: 'Evens out the bass so it sits tight with the kick.' },
     { key: 'bassDuck', label: 'Make room for the kick', type: 'range', min: 0, max: 8, step: 0.5, unit: ' dB', zeroLabel: 'Off', help: 'Dips the bass on each kick so both are heard.' },
@@ -78,7 +99,7 @@ const SCHEMA = [
     { key: 'bassGrit', label: 'Bass on small speakers', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'Adds the bass notes’ upper harmonics, so the bass is heard on phones and laptops.' },
     { key: 'stereoWidth', label: 'Music width', type: 'range', min: 0, max: 1, step: 0.05, format: (v) => pct(0.6 + 0.8 * v), help: 'How wide the instruments spread left and right.' },
   ] },
-  { title: 'Vocal space', items: [
+  { title: 'Vocal space', only: 'song', items: [
     { key: 'duckAmount', label: 'Make room for the vocal', type: 'range', min: 0, max: 8, step: 0.5, unit: ' dB', zeroLabel: 'Off', help: 'Dips the music slightly while someone sings.' },
     { key: 'duckRelease', label: 'How fast the music comes back', type: 'range', min: 50, max: 600, step: 10, unit: ' ms', help: 'How quickly the music returns once the vocal stops.' },
     { key: 'vocalChorus', label: 'Vocal shimmer', type: 'range', min: 0, max: 0.15, step: 0.01, format: offPct, help: 'A faint chorus on the lead vocal for movement. Keep it low.' },
@@ -89,23 +110,23 @@ const SCHEMA = [
     { key: 'mixTape', label: 'Vintage tape', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'Warmth and a softer top end, like an old tape machine.' },
     { key: 'musicCleanup', label: 'Clean up muddy instruments', type: 'toggle', help: 'Cuts muddy or boxy build-up in the instruments where it stands out.' },
   ] },
-  { title: 'Pitch correction', items: [
+  { title: 'Pitch correction', only: 'song', items: [
     { key: 'tuneKey', label: 'Key', type: 'select', options: [
       { value: 'auto', label: 'Detect from the vocal' }, { value: 'chromatic', label: 'Any note (chromatic)' },
       ...NOTE_NAMES.flatMap((nm, i) => [{ value: `${i}:major`, label: `${nm} major` }, { value: `${i}:minor`, label: `${nm} minor` }]),
     ], help: 'Turn on Tune in a vocal stem’s ⋯ settings. Notes are pulled toward the key while the voice stays natural.' },
   ] },
-  { title: 'Song sections', items: [
+  { title: 'Song sections', only: 'song', items: [
     { key: 'sectionAuto', label: 'Section moves', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'Makes hooks bigger and verses drier. You can edit each section after a render.' },
   ] },
-  { title: 'Reverb', items: [
+  { title: 'Reverb', only: 'song', items: [
     { key: 'reverbEnabled', label: 'Reverb', type: 'toggle', help: 'A shared room each bus sends into (amounts in Buses).' },
     { key: 'reverbKind', label: 'Type', type: 'select', options: [{ value: 'room', label: 'Room' }, { value: 'plate', label: 'Plate' }, { value: 'hall', label: 'Hall' }] },
     { key: 'reverbDecay', label: 'Length', type: 'range', min: 0.3, max: 5, step: 0.1, unit: ' s', help: 'How long the reverb tail lasts.' },
     { key: 'reverbPredelay', label: 'Gap before the reverb', type: 'range', min: 0, max: 120, step: 1, unit: ' ms', help: 'A short gap keeps words clear.' },
     { key: 'reverbLevel', label: 'Reverb level', type: 'range', min: -30, max: 0, step: 0.5, unit: ' dB' },
   ] },
-  { title: 'Echo', items: [
+  { title: 'Echo', only: 'song', items: [
     { key: 'delayEnabled', label: 'Echo', type: 'toggle' },
     { key: 'delayTime', label: 'Echo time', type: 'range', min: 60, max: 1000, step: 5, unit: ' ms' },
     { key: 'delayFeedback', label: 'Repeats', type: 'range', min: 0, max: 0.85, step: 0.01, format: pct, help: 'How long the echo keeps repeating.' },
@@ -115,10 +136,10 @@ const SCHEMA = [
   ] },
   { title: 'Finishing and files', items: [
     { key: 'mixGlue', label: 'Glue', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'Gentle compression that makes it feel like one performance.' },
-    { key: 'outputMode', label: 'Output level', type: 'select', options: [{ value: 'headroom', label: 'Ready for mastering (leave room)' }, { value: 'loudness', label: 'Loud (finished level)' }], help: 'Ready for mastering leaves room for the Master page. Loud sounds finished.' },
-    { key: 'headroom', label: 'Peak level (for mastering)', type: 'range', min: -12, max: -1, step: 0.5, unit: ' dBTP' },
-    { key: 'targetLufs', label: 'Loudness (loud mode)', type: 'range', min: -20, max: -8, step: 0.5, unit: ' LUFS' },
-    { key: 'ceiling', label: 'Peak limit (loud mode)', type: 'range', min: -3, max: -0.1, step: 0.1, unit: ' dBTP' },
+    { key: 'outputMode', only: 'song', label: 'Output level', type: 'select', options: [{ value: 'headroom', label: 'Ready for mastering (leave room)' }, { value: 'loudness', label: 'Loud (finished level)' }], help: 'Ready for mastering leaves room for the Master page. Loud sounds finished.' },
+    { key: 'headroom', only: 'song', label: 'Peak level (for mastering)', type: 'range', min: -12, max: -1, step: 0.5, unit: ' dBTP' },
+    { key: 'targetLufs', only: 'song', label: 'Loudness (loud mode)', type: 'range', min: -20, max: -8, step: 0.5, unit: ' LUFS' },
+    { key: 'ceiling', only: 'song', label: 'Peak limit (loud mode)', type: 'range', min: -3, max: -0.1, step: 0.1, unit: ' dBTP' },
     { key: 'bitDepth', label: 'Bit depth', type: 'select', numeric: true, options: [{ value: 16, label: '16-bit (CD)' }, { value: 24, label: '24-bit (recommended)' }, { value: 32, label: '32-bit float' }] },
     { key: 'dither', label: 'Dither', type: 'select', options: [{ value: 'tpdf', label: 'Standard' }, { value: 'shaped', label: 'Noise-shaped (best for 16-bit)' }, { value: 'none', label: 'None' }] },
     { key: 'outputRate', label: 'Sample rate', type: 'select', numeric: true, options: [{ value: 0, label: 'Same as the stems' }, { value: 44100, label: '44.1 kHz' }, { value: 48000, label: '48 kHz' }, { value: 96000, label: '96 kHz' }, { value: 192000, label: '192 kHz' }] },
@@ -164,8 +185,43 @@ function easyMixValues(e) {
   };
 }
 
-export function inferCategory(name) {
+// ---- Easy page for a video, ad or podcast: seven sliders and where it's going ----
+const EASY_POST_DEFAULTS = { clarity: 0, even: 0.6, clean: 0, music: 0, under: 0.5, fx: 0, amb: 0, delivery: 'web' };
+const EASY_POST = [
+  { key: 'clarity', label: 'Voice clarity', help: 'How crisp and present the voices sound.', min: -1, max: 1, def: 0, ends: ['Soft', 'Crisp'], show: (v) => easyWords(v, { lo: 'Softer', hi: 'Crisper', off: '' }) },
+  { key: 'even', label: 'Even out the voices', help: 'Smooths quiet and loud phrases.', min: 0, max: 1, def: 0.6, ends: ['Leave', 'Very even'], show: offPct },
+  { key: 'clean', label: 'Clean up noise', help: 'Lowers hiss and room noise under the voices.', min: 0, max: 1, def: 0, ends: ['Off', 'Strong'], show: offPct },
+  { key: 'music', label: 'Music level', help: 'How loud the music is overall.', min: -1, max: 1, def: 0, ends: ['Quieter', 'Louder'], show: (v) => easyWords(v, { lo: 'Quieter', hi: 'Louder', off: '' }) },
+  { key: 'under', label: 'Music under the voices', help: 'How far the music drops while someone speaks.', min: 0, max: 1, def: 0.5, ends: ['A little', 'A lot'], show: (v) => `${(3 + 9 * v).toFixed(1)} dB` },
+  { key: 'fx', label: 'Effects level', help: 'How loud the sound effects are.', min: -1, max: 1, def: 0, ends: ['Quieter', 'Louder'], show: (v) => easyWords(v, { lo: 'Quieter', hi: 'Louder', off: '' }) },
+  { key: 'amb', label: 'Ambience level', help: 'Room tone and backgrounds.', min: -1, max: 1, def: 0, ends: ['Quieter', 'Louder'], show: (v) => easyWords(v, { lo: 'Quieter', hi: 'Louder', off: '' }) },
+  { key: 'delivery', label: 'Made for', help: 'Sets the loudness. Check your platform’s own spec.', options: Object.entries(DELIVERY).map(([value, d]) => ({ value, label: `${d.label} (${d.lufs} LUFS)` })) },
+];
+
+function easyPostValues(e) {
+  const q = (x, step) => Math.round(x / step) * step;
+  const buses = structuredClone(BUS_DEFAULTS);
+  buses.music.gain = q(6 * e.music, 0.5);
+  buses.fx.gain = q(6 * e.fx, 0.5);
+  buses.ambience.gain = q(6 * e.amb, 0.5);
+  return {
+    values: {
+      ...MIX_DEFAULTS, project: 'post', delivery: e.delivery,
+      vocalPresence: q(0.55 + 0.18 * e.clarity, 0.01), dialogueLeveler: e.even, dialogueDenoise: e.clean,
+      musicDuck: q(3 + 9 * e.under, 0.5), musicCarve: q(1.5 + 3 * e.under, 0.5), renderBusStems: true, spatial: 'off',
+    },
+    buses,
+  };
+}
+
+export function inferCategory(name, mode = project) {
   const n = name.toLowerCase();
+  if (mode === 'post') {
+    if (/(^|[^a-z])(vo|v\.o|voiceover|voice ?over|voice|dialog|dialogue|dx|host|guest|interview|narration|narrator|presenter|speaker|lav|boom ?mic|adr)([^a-z0-9]|$)/.test(n)) return 'vocals';
+    if (/(^|[^a-z])(amb|ambience|ambiance|atmos?|room ?tone|roomtone|bg|backgrounds?|wild ?track)([^a-z0-9]|$)/.test(n)) return 'ambience';
+    if (/(^|[^a-z])(sfx|fx|foley|whoosh|swoosh|swish|impacts?|hits?|riser|transition|stinger|sound ?effects?)([^a-z0-9]|$)/.test(n)) return 'fx';
+    return 'music';
+  }
   if (/(^|[^a-z])(vox|vocals?|voc|lead|hook|chorus|verse|adlibs?|ad-libs?|bgv|backing|harmon(y|ies)|doubles?|dbls?|stack)([^a-z]|$)/.test(n)) return 'vocals';
   if (/808|(^|[^a-z])(bass|sub|bassline)([^a-z]|$)/.test(n)) return 'bass';
   if (/(^|[^a-z])(kick|snare|clap|hats?|hihats?|hi-hats?|perc(ussion)?|toms?|rim|ride|cymbals?|crash|drums?|shaker|loop)([^a-z]|$)/.test(n)) return 'drums';
@@ -216,7 +272,8 @@ export function initMix({ engine, sendToMaster, onMode }) {
     rough: null,
     style: saved?.style || 'clean',
     values: { ...MIX_DEFAULTS, ...(saved?.values || {}) },
-    buses: structuredClone(saved?.buses || BUS_DEFAULTS),
+    buses: { ...structuredClone(BUS_DEFAULTS), ...structuredClone(saved?.buses || {}) },
+    easyPost: { ...EASY_POST_DEFAULTS, ...(saved?.easyPost || {}) },
     easy: { ...EASY_DEFAULTS, ...(saved?.easy?.space != null ? { verb: saved.easy.space } : {}), ...(saved?.easy || {}) },
     result: null,
     busy: false,
@@ -227,8 +284,23 @@ export function initMix({ engine, sendToMaster, onMode }) {
   const $ = (id) => document.getElementById(id);
   const renderBtn = $('x-render');
   const easyBtn = $('xe-render');
-  const persist = () => store(STATE_KEY, { style: state.style, values: state.values, buses: state.buses, easy: state.easy });
-  buildEasy($('xe-controls'), EASY, state.easy, persist);
+  const persist = () => store(STATE_KEY, { style: state.style, values: state.values, buses: state.buses, easy: state.easy, easyPost: state.easyPost });
+  project = state.values.project === 'post' ? 'post' : 'song';
+  const renderEasy = () => {
+    if (project === 'post') buildEasy($('xe-controls'), EASY_POST, state.easyPost, () => { persist(); renderEasyHint(); });
+    else buildEasy($('xe-controls'), EASY, state.easy, persist);
+    const head = document.querySelector('#tab-mix .easy-view .easy-head');
+    head.querySelector('h1').textContent = project === 'post' ? 'Mix a video, ad or podcast' : 'Mix your stems';
+    head.querySelector('p').textContent = project === 'post'
+      ? 'Drop the dialogue, music, effects and ambience. They’re sorted for you; fix any that land in the wrong spot.'
+      : 'Drop all the stems from one song. They’re sorted for you; fix any that land in the wrong spot.';
+    renderEasyHint();
+  };
+  function renderEasyHint() {
+    const hint = document.querySelector('#tab-mix .easy-view .render-bar + .hint');
+    if (hint) hint.textContent = project === 'post' ? `Comes out at ${DELIVERY[state.easyPost.delivery]?.label || 'your chosen'} loudness (${DELIVERY[state.easyPost.delivery]?.lufs} LUFS).` : 'Comes out at streaming volume (-12 LUFS).';
+  }
+  renderEasy();
   // Results sit under the Easy controls, or below the stem routing in Advanced.
   onMode((mode) => $(mode === 'easy' ? 'xe-results-slot' : 'x-results-slot').append($('x-results')));
 
@@ -236,7 +308,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
 
   const styleChips = chipGroup($('x-styles'), Object.entries(STYLES).map(([k, s]) => [k, s.label]), state.style, (key) => {
     state.style = key;
-    const keep = Object.fromEntries(['bitDepth', 'dither', 'outputRate', 'renderBusStems', 'outputMode', 'headroom', 'targetLufs', 'ceiling', 'spatial', 'spatialCentre', 'spatialLfe'].map((k) => [k, state.values[k]]));
+    const keep = Object.fromEntries(['project', 'delivery', 'dialogueLeveler', 'dialogueDenoise', 'matchVoices', 'musicDuck', 'musicCarve', 'sfxDuck', 'ambDuck', 'dialogueRoom', 'bitDepth', 'dither', 'outputRate', 'renderBusStems', 'outputMode', 'headroom', 'targetLufs', 'ceiling', 'spatial', 'spatialCentre', 'spatialLfe'].map((k) => [k, state.values[k]]));
     Object.assign(state.values, MIX_DEFAULTS, STYLES[key].set, keep);
     state.buses = structuredClone(BUS_DEFAULTS);
     for (const [b, o] of Object.entries(STYLES[key].buses)) Object.assign(state.buses[b], o);
@@ -250,7 +322,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
     const root = $('x-buses');
     root.innerHTML = '';
     root.append(el('span', { class: 'head' }, ''), el('span', { class: 'head' }, 'Level / tone'), el('span', { class: 'head' }, 'Glue / width'), el('span', { class: 'head' }, 'Reverb / delay'));
-    for (const [key, label] of CATEGORIES) {
+    for (const [key, label] of categories()) {
       const b = state.buses[key];
       const slider = (prop, min, max, step, fmt) => {
         const out = el('output', {}, fmt(b[prop]));
@@ -375,7 +447,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
 
   function stemRow(s) {
     const row = el('div', { class: `stem${s.mute ? ' muted' : ''}${s.open ? ' open' : ''}`, dataset: { cat: s.category } });
-    const cat = el('select', { 'aria-label': `${s.name} category` }, CATEGORIES.map(([k, l]) => el('option', { value: k }, l)));
+    const cat = el('select', { 'aria-label': `${s.name} category` }, categories().map(([k, l]) => el('option', { value: k }, l)));
     cat.value = s.category;
     cat.addEventListener('change', () => {
       s.category = cat.value;
@@ -383,7 +455,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
       if (s.category === 'vocals') { s.role = inferRole(s.name); if (!s.panTouched) s.pan = rolePan(s.role); }
       renderStems();
     });
-    const role = el('select', { 'aria-label': `${s.name} vocal role`, disabled: s.category !== 'vocals' }, ROLES.map(([k, l]) => el('option', { value: k }, l)));
+    const role = el('select', { 'aria-label': `${s.name} vocal role`, disabled: s.category !== 'vocals' || project === 'post' }, ROLES.map(([k, l]) => el('option', { value: k }, l)));
     role.value = s.role;
     role.addEventListener('change', () => { s.role = role.value; if (!s.panTouched) s.pan = rolePan(s.role); renderStems(); });
     const toggle = (cls, prop, label, title) => {
@@ -428,7 +500,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
 
   // Easy page: one compact row per stem with its bus.
   function easyStemRow(s) {
-    const cat = el('select', { 'aria-label': `${s.name} goes to` }, CATEGORIES.map(([k, l]) => el('option', { value: k }, l)));
+    const cat = el('select', { 'aria-label': `${s.name} goes to` }, categories().map(([k, l]) => el('option', { value: k }, l)));
     cat.value = s.category;
     cat.addEventListener('change', () => {
       s.category = cat.value;
@@ -454,7 +526,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
     for (const s of state.stems) counts[s.category] = (counts[s.category] || 0) + 1;
     const summary = $('x-summary');
     summary.innerHTML = '';
-    for (const [k, l] of CATEGORIES) if (counts[k]) summary.append(el('span', { class: 'tag', style: `--c: var(${BUS_COLORS[k]})` }, `${l} ${counts[k]}`));
+    for (const [k, l] of categories()) if (counts[k]) summary.append(el('span', { class: 'tag', style: `--c: var(${BUS_COLORS[k]})` }, `${l} ${counts[k]}`));
     const valid = state.stems.filter((s) => s.info?.valid);
     const dur = Math.max(0, ...valid.map((s) => s.info.duration));
     $('x-stem-count').textContent = state.stems.length ? `${state.stems.length} stem${state.stems.length > 1 ? 's' : ''} · ${dur ? `${Math.floor(dur / 60)}:${String(Math.round(dur % 60)).padStart(2, '0')}` : ''}` : '';
@@ -466,10 +538,29 @@ export function initMix({ engine, sendToMaster, onMode }) {
   // ---- Render ----
   // A job is what one render uses: the Easy sliders, or the Advanced values as they stand.
   function renderJob(mode) {
+    if (mode === 'easy' && project === 'post') return { mode, ...easyPostValues(state.easyPost), style: 'Easy', progress: $('xe-progress') };
     if (mode === 'easy') return { mode, ...easyMixValues(state.easy), style: 'Easy', progress: $('xe-progress') };
     return { mode, values: state.values, buses: state.buses, style: `${STYLES[state.style]?.label} style`, progress: $('x-progress') };
   }
   function engineSettings(sessionStems, job) {
+    const v = job.values;
+    const s = engineBase(sessionStems, job);
+    if (v.project !== 'post') return s;
+    // Video, ad or podcast: loudness and peak from the delivery standard, no
+    // song-style riding, sections, echo or pitch work, and only a small room on the voices.
+    const d = DELIVERY[v.delivery] || DELIVERY.web;
+    const buses = structuredClone(job.buses);
+    for (const k of Object.keys(buses)) { buses[k].sendReverb = k === 'vocals' ? v.dialogueRoom || 0 : 0; buses[k].sendDelay = 0; }
+    for (const st of s.stems) { st.tune = 0; st.role = 'lead'; }
+    return {
+      ...s, mode: 'post', delivery: v.delivery, dialogueLeveler: v.dialogueLeveler, dialogueDenoise: v.dialogueDenoise, matchVoices: v.matchVoices,
+      musicDuck: v.musicDuck, musicCarve: v.musicCarve, sfxDuck: v.sfxDuck, ambDuck: v.ambDuck,
+      outputMode: 'loudness', targetLufs: d.lufs, ceiling: d.ceiling, riderStrength: 0, sectionAuto: 0, alternates: false,
+      buses, reverb: { enabled: (v.dialogueRoom || 0) > 0.01, kind: 'room', decay: 0.6, predelay: 10, level: -16 }, delay: { enabled: false },
+      vocalChorus: 0, mixTape: 0, mixGlue: Math.min(v.mixGlue, 0.15),
+    };
+  }
+  function engineBase(sessionStems, job) {
     const v = job.values;
     return {
       stems: sessionStems.map((s) => ({
@@ -506,7 +597,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
       const sr = Number(Object.entries(rates).sort((a, b) => b[1] - a[1])[0]?.[0]) || 48000;
       const length = Math.max(...stems.map((s) => framesAt(s.info, sr)));
       const settings = engineSettings(stems, job);
-      if (job.mode === 'advanced' && state.sectionEdits && state.sectionEdits.sig === stemSig()) settings.sections = state.sectionEdits.list;
+      if (job.mode === 'advanced' && project === 'song' && state.sectionEdits && state.sectionEdits.sig === stemSig()) settings.sections = state.sectionEdits.list;
       const t0 = performance.now();
       await engine.run('mixBegin', { settings, sr, length });
       if (state.rough?.info?.valid) {
@@ -573,7 +664,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
       return { name, data: new Uint8Array(buffer) };
     };
     const tag = r.spatial ? r.spatial.layout.replace(/\./g, '') : '';
-    const BUS_NAMES = Object.fromEntries(CATEGORIES);
+    const BUS_NAMES = Object.fromEntries(categories());
     // Download all: the mix and each bus stem; in Advanced also the surround
     // files and data files.
     const mixMp3 = async () => ({ name: 'mix.mp3', data: (await encodeMp3({ sr: r.sr, channels: r.channels }, { meta: { title: 'Mix' }, peakDbtp: out.peak.truePeakDbtp })).data });
@@ -610,6 +701,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
       } },
     );
     root.append(section('Download', downloadsRow(items)));
+    if (rep.delivery) root.append(deliverySection(rep.delivery));
     if (rep.rough) root.append(roughSection(rep.rough));
     // Everything after this point is the detailed report (Advanced only).
     const core = root.children.length;
@@ -682,6 +774,20 @@ export function initMix({ engine, sendToMaster, onMode }) {
     root.append(section('Mix measurements', metricsTable([{ label: 'Mix', analysis: out }])));
     [...root.children].slice(core).forEach((n) => n.classList.add('adv-only'));
     root.insertBefore(el('p', { class: 'hint center easy-only' }, 'Want charts and section editing? Switch to Advanced at the top of the page.'), root.children[core] || null);
+  }
+
+  // Pass/check list against the delivery standard, plus dead air and how even the voices are.
+  function deliverySection(d) {
+    const row = (ok, text) => el('li', {}, el('span', { class: `mark ${ok ? 'pass' : 'check'}` }, ok ? 'Pass' : 'Check'), el('span', {}, text));
+    const items = [];
+    if (d.targetLufs != null) {
+      items.push(row(d.loudnessOk, `Loudness ${fx(d.achievedLufs, 1)} LUFS (target ${d.targetLufs}, within ${d.tolerance})`));
+      items.push(row(d.peakOk, `Peaks ${fx(d.truePeakDbtp, 1)} dBTP (at most ${d.ceiling})`));
+    }
+    items.push(row(!d.deadAir.length, d.deadAir.length ? `Silence of 2 s or more at ${d.deadAir.map((x) => `${fmtT(x.start)}–${fmtT(x.end)}`).join(', ')}` : 'No dead air (no silence of 2 s or more)'));
+    if (d.voice) items.push(row(d.voice.spreadDb <= 6, `Voices stay within ${fx(d.voice.spreadDb, 1)} dB phrase to phrase${d.voice.spreadDb > 6 ? '; try more “Even out the voices”' : ''}`));
+    return section(`Delivery check: ${d.label}`, el('ul', { class: 'check-list' }, items),
+      el('p', { class: 'hint' }, 'These are common targets. Always check the delivery spec from your broadcaster, platform or client.'));
   }
 
   function roughSection(rough) {
@@ -775,6 +881,28 @@ export function initMix({ engine, sendToMaster, onMode }) {
   function riderChart(curves) {
     return gainReductionChart(curves, { title: 'Automation', caption: 'Vocal rider moves (above or below 0 dB), music ducking under the vocal, and limiter reduction.' });
   }
+
+  // ---- Song, or video / ad / podcast ----
+  const projectButtons = [...document.querySelectorAll('#tab-mix .project-switch button')];
+  function setProject(p, { recategorize = true } = {}) {
+    project = p;
+    state.values.project = p;
+    document.documentElement.dataset.project = p;
+    projectButtons.forEach((b) => b.setAttribute('aria-checked', String(b.dataset.project === p)));
+    if (recategorize) {
+      for (const st of state.stems) {
+        st.category = inferCategory(st.name, p);
+        Object.assign(st, STEM_DEFAULTS[st.category]);
+        st.role = st.category === 'vocals' && p === 'song' ? inferRole(st.name) : 'lead';
+      }
+    }
+    renderEasy();
+    renderBuses();
+    renderStems();
+    persist();
+  }
+  projectButtons.forEach((b) => b.addEventListener('click', () => setProject(b.dataset.project)));
+  setProject(project, { recategorize: false });
 
   return { addFiles };
 }

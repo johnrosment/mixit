@@ -10,13 +10,14 @@ import { sha256Hex, qcHtml, manifest } from './qc.js';
 import { renderBinaural } from './binaural.js';
 import { encodeMp3, mp3Bitrate, mp3SizeMb } from './mp3.js';
 import { LAYOUTS } from './engine/spatial.js';
+import { DELIVERY } from './engine/post.js';
 import {
   fx, sx, metricsTable, kpis, loudnessChart, spectrumChart, correlationChart, gainReductionChart, barChart, curveChart,
   stageLog, callouts, section, downloadsRow, toJson, loudnessCsv, spectrumCsv, monoChart, spectrogramChart, repairTable,
 } from './report.js';
 
 export const MASTER_DEFAULTS = {
-  targetLufs: -14, ceiling: -1, lookahead: 5, release: 80,
+  delivery: 'custom', targetLufs: -14, ceiling: -1, lookahead: 5, release: 80,
   hpf: 25, low: 0, mid: 0, high: 0, tilt: 0, air: 0, deMud: 0, deMudFreq: 300,
   refStrength: 0.7, profileWidth: 0.5, profileLoudness: false, resonance: 0.3, deess: 0.15,
   multiband: 0.35, xLow: 120, xHigh: 2500, glue: 0.28,
@@ -32,7 +33,7 @@ export const MASTER_DEFAULTS = {
 };
 
 // Keys that shape files and deliverables rather than the processing chain.
-const OUTPUT_ONLY = ['format', 'bitDepth', 'dither', 'outputRate', 'trim', 'fadeIn', 'fadeOut', 'platformPack', 'variations', 'mono', 'vinyl',
+const OUTPUT_ONLY = ['delivery', 'format', 'bitDepth', 'dither', 'outputRate', 'trim', 'fadeIn', 'fadeOut', 'platformPack', 'variations', 'mono', 'vinyl',
   'layers', 'loop', 'loopSeam', 'hiRes', 'spatial', 'spatialCentre', 'spatialSurround', 'spatialLfe', 'cohesion', 'albumGap', 'title', 'artist', 'album', 'year', 'isrc'];
 const OUTPUT_KEYS = [...OUTPUT_ONLY, 'targetLufs', 'ceiling'];
 
@@ -52,6 +53,7 @@ const offPct = (v) => (v ? pct(v) : 'Off');
 
 const SCHEMA = [
   { title: 'Loudness and peaks', open: true, items: [
+    { key: 'delivery', label: 'Made for', type: 'select', options: [{ value: 'custom', label: 'Music (set loudness below)' }, ...Object.entries(DELIVERY).map(([value, d]) => ({ value, label: `${d.label}: ${d.lufs} LUFS, peaks ${d.ceiling} dBTP` }))], help: 'Video, ad, podcast and TV standards set the loudness and peak limit for you. Always check your platform’s own spec.' },
     { key: 'targetLufs', label: 'Loudness', type: 'range', min: -24, max: -6, step: 0.5, unit: ' LUFS', decimals: 1, help: 'How loud the finished song is. Streaming apps sit around -14; -9 is very loud.' },
     { key: 'ceiling', label: 'Peak limit', type: 'range', min: -3, max: -0.1, step: 0.1, unit: ' dBTP', help: 'The loudest any moment can get. -1 stays clean on streaming apps.' },
     { key: 'lookahead', label: 'Limiter reaction time', type: 'range', min: 1, max: 10, step: 0.5, unit: ' ms', help: 'How far ahead the limiter looks. Leave it unless hits sound dull.' },
@@ -212,6 +214,15 @@ export function initMaster({ engine, onMode }) {
 
   const profileDefaults = () => ({ ...MASTER_DEFAULTS, ...PROFILES[state.profile].set });
   const controls = buildSections($('m-controls'), SCHEMA, state.values, profileDefaults(), (key) => {
+    // A delivery standard sets loudness and peaks; moving either by hand goes back to custom.
+    if (key === 'delivery' && DELIVERY[state.values.delivery]) {
+      state.values.targetLufs = DELIVERY[state.values.delivery].lufs;
+      state.values.ceiling = DELIVERY[state.values.delivery].ceiling;
+      controls.update(state.values);
+    } else if ((key === 'targetLufs' || key === 'ceiling') && state.values.delivery !== 'custom') {
+      state.values.delivery = 'custom';
+      controls.update(state.values);
+    }
     if (state.profile === 'auto' && !OUTPUT_KEYS.includes(key)) state.locked.add(key);
     persist();
   });
@@ -418,7 +429,7 @@ export function initMaster({ engine, onMode }) {
     const output = {
       bits: v.format === 'flac' && v.bitDepth === 32 ? 24 : v.bitDepth, dither: v.dither, outputRate: v.outputRate, format: v.format,
       meta: { title: v.title, artist: v.artist, album: v.album, year: v.year, isrc: v.isrc, software: 'MIXIT' },
-      finish: { trim: v.trim, fadeIn: v.fadeIn, fadeOut: v.fadeOut },
+      finish: { trim: v.trim, fadeIn: v.fadeIn, fadeOut: v.fadeOut }, delivery: v.delivery,
       deliver: { layers: v.layers, loop: v.loop, loopSeam: v.loopSeam, hiRes: v.hiRes, albumGap: v.albumGap },
     };
     const saved = job.sound;
@@ -525,6 +536,15 @@ export function initMaster({ engine, onMode }) {
     const finishDesc = [r.output.finish.trim ? 'edge silence trimmed' : null, r.output.finish.fadeIn ? `${r.output.finish.fadeIn} ms fade-in` : null, r.output.finish.fadeOut ? `${r.output.finish.fadeOut} ms fade-out` : null].filter(Boolean).join(', ');
     resultsRoot.append(section('Download', downloadsRow(downloadItems(r)),
       el('p', { class: 'hint' }, `Master: ${fmtDesc}, ${r.output.outputRate ? `${r.output.outputRate / 1000} kHz` : 'same sample rate as the source'}${finishDesc ? `, ${finishDesc}` : ''}. Files are made right here; nothing is uploaded.`)));
+    const std = DELIVERY[r.output.delivery];
+    if (std) {
+      const lufs = rep.output.loudness.integrated, tp = rep.output.peak.truePeakDbtp;
+      const row = (ok, text) => el('li', {}, el('span', { class: `mark ${ok ? 'pass' : 'check'}` }, ok ? 'Pass' : 'Check'), el('span', {}, text));
+      resultsRoot.append(section(`Delivery check: ${std.label}`, el('ul', { class: 'check-list' },
+        row(Math.abs(lufs - std.lufs) <= std.tolerance, `Loudness ${fx(lufs, 1)} LUFS (target ${std.lufs}, within ${std.tolerance})`),
+        row(tp <= std.ceiling + 0.05, `Peaks ${fx(tp, 1)} dBTP (at most ${std.ceiling})`)),
+        el('p', { class: 'hint' }, 'These are common targets. Always check the delivery spec from your broadcaster, platform or client.')));
+    }
     // Everything after this point is the detailed report (Advanced only).
     const core = resultsRoot.children.length;
 

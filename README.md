@@ -35,6 +35,12 @@ account to make and nothing to install.
 
 <p align="center"><img src="docs/master.png" alt="The Easy mastering page" width="720"></p>
 
+### Videos, ads and podcasts
+- Switch the Mix page to **Video, ad or podcast** and drop dialogue, music, effects and ambience.
+- Voices are cleaned, evened out and matched; music, effects and ambience step back while someone speaks.
+- Pick where it's going (online video, podcast, TV in Europe or the US) and get a delivery check:
+  loudness and peaks against the standard, dead air, and how even the voices are.
+
 ### Analyze
 Loudness, peaks, tone, stereo width and tempo, plus a check for hum, clicks, clipping
 and background noise.

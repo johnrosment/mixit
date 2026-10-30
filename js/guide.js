@@ -15,6 +15,16 @@ export const GUIDE_HTML = `
   <li><b>Pitch correction</b> (Advanced, per vocal stem) pulls sung notes toward the key while keeping the voice natural. <b>Section moves</b> find verses and hooks and add contrast between them.</li>
 </ul>
 
+<h2>Videos, ads and podcasts</h2>
+<p>On the Mix page, switch <b>Song</b> to <b>Video, ad or podcast</b>. Stems are then sorted into <b>dialogue</b>, <b>music</b>, <b>effects</b> and <b>ambience</b> (names like "VO", "host", "dx", "SFX", "foley" or "room tone" are recognised).</p>
+<ul>
+  <li><b>Dialogue first.</b> Each voice is cleaned up, its quiet and loud phrases are evened out, and every speaker is brought to the same level before anything else is added. Song-style warmth, chorus and pitch work are left off.</li>
+  <li><b>Music, effects and ambience make room.</b> They step back while someone speaks and come back up in the pauses; the music also clears the range the words live in.</li>
+  <li><b>Made for.</b> Pick where it's going: online video (-14 LUFS), podcast (-16), TV in Europe (EBU R128, -23, peaks -1) or TV in the US (ATSC A/85, -24, peaks -2). These are common targets; always check the spec from your broadcaster, platform or client.</li>
+  <li><b>Delivery check.</b> The result lists whether loudness and peaks are within the standard, any dead air (silence of 2 seconds or more), and how even the voices are.</li>
+  <li>Mastering a finished ad or episode? On the Master page in Advanced, <b>Made for</b> sets the same standards.</li>
+</ul>
+
 <h2>Mastering a song</h2>
 <ul>
   <li>MIXIT listens to the track first and sets a starting point: brightness, muddiness cleanup, softening of harsh "s" sounds, compression and centred bass. Anything you change by hand is kept.</li>

@@ -32,6 +32,7 @@
   --c-bass: #2c3f3d;
   --c-music: #5fa8a0;
   --c-fx: #b59255;
+  --c-amb: #8a7550;
   --radius: 3px;
   --shadow: 4px 4px 0 var(--ink);
   --font: "Avenir Next", "Avenir", "Segoe UI", "Helvetica Neue", system-ui, sans-serif;
@@ -91,14 +92,22 @@ a { color: var(--teal-deep); }
 .tabs button:hover { color: var(--text); }
 .tabs button[aria-selected="true"] { color: var(--text); }
 .tabs button[aria-selected="true"]::after { transform: scaleX(1); }
-.page-bar { display: flex; justify-content: center; margin: 0 0 26px; }
-.mode-switch { display: inline-flex; border: 2px solid var(--ink); background: var(--card); }
-.mode-switch button {
+.page-bar { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px 18px; margin: 0 0 26px; }
+.mode-switch, .project-switch { display: inline-flex; border: 2px solid var(--ink); background: var(--card); }
+.mode-switch button, .project-switch button {
   border: 0; background: none; padding: 9px 22px; cursor: pointer; font-family: var(--display); font-weight: 700;
   text-transform: uppercase; letter-spacing: .1em; font-size: 14px; color: var(--muted); transition: background .2s, color .2s;
 }
-.mode-switch button:hover:not([aria-checked="true"]) { color: var(--text); }
+.mode-switch button:hover:not([aria-checked="true"]), .project-switch button:hover:not([aria-checked="true"]) { color: var(--text); }
 .mode-switch button[aria-checked="true"] { background: var(--teal); color: var(--card); }
+.project-switch button[aria-checked="true"] { background: var(--ink); color: var(--card); }
+html[data-project="song"] .only-post, html[data-project="post"] .only-song { display: none !important; }
+.easy-ctl.easy-select select { grid-column: 1 / -1; background: var(--card-2); border: 2px solid var(--line); padding: 8px 10px; font-size: 16px; margin-top: 4px; }
+.check-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.check-list li { display: flex; gap: 10px; align-items: baseline; }
+.check-list .mark { font-weight: 700; min-width: 54px; }
+.check-list .mark.pass { color: var(--teal-deep); }
+.check-list .mark.check { color: var(--red-deep); }
 
 /* ---------- Layout ---------- */
 main { padding: 28px 24px 64px; max-width: 1480px; margin: 0 auto; }
@@ -147,6 +156,7 @@ html[data-mode="easy"] .adv-view, html[data-mode="advanced"] .easy-view { displa
 .easy-stem[data-cat="bass"] { --c: var(--c-bass); }
 .easy-stem[data-cat="music"] { --c: var(--c-music); }
 .easy-stem[data-cat="fx"] { --c: var(--c-fx); }
+.easy-stem[data-cat="ambience"] { --c: var(--c-amb); }
 .easy-stem .nm { min-width: 0; }
 .easy-stem .nm b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .easy-stem .nm small { color: var(--muted); font-size: 13.5px; }
@@ -416,6 +426,7 @@ html[data-mode="easy"] :is(#tab-mix, #tab-master) .downloads .btn:not(.in-easy),
 .stem[data-cat="bass"] { --c: var(--c-bass); }
 .stem[data-cat="music"] { --c: var(--c-music); }
 .stem[data-cat="fx"] { --c: var(--c-fx); }
+.stem[data-cat="ambience"] { --c: var(--c-amb); }
 .stem.muted { opacity: .55; }
 .stem-main { display: grid; grid-template-columns: minmax(140px, 1.4fr) 110px 120px auto minmax(120px, 1fr) minmax(110px, .9fr) auto; gap: 10px; align-items: center; padding: 10px 12px; }
 .stem-name { min-width: 0; }

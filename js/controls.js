@@ -95,9 +95,10 @@ export function buildSections(root, schema, values, defaults, onChange) {
     for (const item of sec.items) {
       const ref = BUILDERS[item.type](item, values, defaults, onChange);
       refs[item.key] = ref;
+      if (item.only) ref.el.classList.add(`only-${item.only}`);
       grid.append(ref.el);
     }
-    root.append(el('details', { class: 'ctl-section', open: !!sec.open }, el('summary', {}, sec.title), grid));
+    root.append(el('details', { class: `ctl-section${sec.only ? ` only-${sec.only}` : ''}`, open: !!sec.open }, el('summary', {}, sec.title), grid));
   }
   return {
     update(vals) { for (const [k, r] of Object.entries(refs)) if (vals[k] !== undefined) r.set(vals[k]); },
@@ -119,6 +120,14 @@ export function buildEasy(root, items, values, onChange) {
   const refs = {};
   for (const item of items) {
     const id = `ctl-${++uid}`;
+    if (item.options) {
+      const select = el('select', { id }, item.options.map((o) => el('option', { value: o.value }, o.label)));
+      select.value = values[item.key];
+      select.addEventListener('change', () => { values[item.key] = select.value; onChange(item.key, select.value); });
+      root.append(el('div', { class: 'easy-ctl easy-select' }, el('label', { for: id }, item.label), el('span'), el('p', { class: 'help' }, item.help), select));
+      refs[item.key] = { input: select, show: () => {} };
+      continue;
+    }
     const input = el('input', { type: 'range', id, min: item.min, max: item.max, step: item.step || 0.05 });
     input.value = values[item.key];
     const out = el('output', { for: id, title: 'Double-click to reset' });
