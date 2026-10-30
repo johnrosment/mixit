@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 296 56" role="img" aria-label="MIXIT">
+  <rect width="56" height="56" fill="#1b7a73"/><polygon points="10,46 10,10 19,10 28,25 37,10 46,10 46,46 38,46 38,24 28,40 18,24 18,46" fill="#fffdf8"/>
+  <rect x="60" width="56" height="56" fill="#d2442c"/><rect x="82" y="10" width="12" height="36" fill="#fffdf8"/>
+  <rect x="120" width="56" height="56" fill="#1c2b2a"/><polygon points="130,10 141,10 148,21 155,10 166,10 154,28 166,46 155,46 148,35 141,46 130,46 142,28" fill="#fffdf8"/>
+  <rect x="180" width="56" height="56" fill="#ecdfc6"/><rect x="202" y="10" width="12" height="36" fill="#1b7a73"/>
+  <rect x="240" width="56" height="56" fill="#1b7a73"/><rect x="250" y="10" width="36" height="10" fill="#fffdf8"/><rect x="262" y="20" width="12" height="26" fill="#fffdf8"/>
+</svg>

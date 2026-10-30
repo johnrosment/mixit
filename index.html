@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en" data-mode="easy">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MIXIT</title>
+<meta name="description" content="Mix stems and master songs in your browser. Your audio never leaves your device.">
+<meta name="theme-color" content="#f5efe3">
+<meta property="og:type" content="website">
+<meta property="og:title" content="MIXIT: mix it, master it">
+<meta property="og:description" content="Mix stems and master songs in your browser. Your audio never leaves your device.">
+<meta property="og:url" content="https://mixit-opal.vercel.app/">
+<meta property="og:image" content="https://mixit-opal.vercel.app/docs/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="stylesheet" href="css/app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 56 56'%3E%3Crect width='56' height='56' fill='%231b7a73'/%3E%3Cpolygon points='10,46 10,10 19,10 28,25 37,10 46,10 46,46 38,46 38,24 28,40 18,24 18,46' fill='%23fffdf8'/%3E%3C/svg%3E">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="#home" data-go="home" aria-label="MIXIT home">
+    <svg class="logo" viewBox="0 0 296 56" role="img" aria-label="MIXIT">
+      <g class="tile t1"><rect width="56" height="56" style="fill:var(--teal)"/><polygon points="10,46 10,10 19,10 28,25 37,10 46,10 46,46 38,46 38,24 28,40 18,24 18,46" style="fill:var(--card)"/></g>
+      <g class="tile t2"><rect x="60" width="56" height="56" style="fill:var(--red)"/><rect x="82" y="10" width="12" height="36" style="fill:var(--card)"/></g>
+      <g class="tile t3"><rect x="120" width="56" height="56" style="fill:var(--ink)"/><polygon points="130,10 141,10 148,21 155,10 166,10 154,28 166,46 155,46 148,35 141,46 130,46 142,28" style="fill:var(--card)"/></g>
+      <g class="tile t4"><rect x="180" width="56" height="56" style="fill:var(--cream)"/><rect x="202" y="10" width="12" height="36" style="fill:var(--teal)"/></g>
+      <g class="tile t5"><rect x="240" width="56" height="56" style="fill:var(--teal)"/><rect x="250" y="10" width="36" height="10" style="fill:var(--card)"/><rect x="262" y="20" width="12" height="26" style="fill:var(--card)"/></g>
+    </svg>
+  </a>
+  <nav class="tabs" role="tablist" aria-label="Workspaces">
+    <button role="tab" id="tab-btn-home" aria-controls="tab-home" aria-selected="true" data-tab="home">Home</button>
+    <button role="tab" id="tab-btn-mix" aria-controls="tab-mix" aria-selected="false" data-tab="mix">Mix</button>
+    <button role="tab" id="tab-btn-master" aria-controls="tab-master" aria-selected="false" data-tab="master">Master</button>
+    <button role="tab" id="tab-btn-analyze" aria-controls="tab-analyze" aria-selected="false" data-tab="analyze">Analyze</button>
+    <button role="tab" id="tab-btn-guide" aria-controls="tab-guide" aria-selected="false" data-tab="guide">Guide</button>
+  </nav>
+</header>
+
+<main>
+  <!-- HOME -->
+  <section class="tab" id="tab-home" role="tabpanel" aria-labelledby="tab-btn-home">
+    <div class="home">
+      <div class="hero">
+        <div class="hero-text">
+          <h1><span class="l1">Mix it.</span><span class="l2">Master it.</span></h1>
+          <p class="kicker">Mixing and mastering in your browser</p>
+        </div>
+        <svg class="hero-art" id="hero-art" viewBox="0 0 400 340" aria-hidden="true"></svg>
+      </div>
+      <div class="paths">
+        <button type="button" class="path" data-go="mix"><i class="shape circle"></i><b>Mix</b><span>Turn your stems into a balanced mix.</span></button>
+        <button type="button" class="path" data-go="master"><i class="shape square"></i><b>Master</b><span>Make a finished song loud, clear and ready to release.</span></button>
+        <button type="button" class="path" data-go="analyze"><i class="shape triangle"></i><b>Analyze</b><span>Check a track's loudness, tone and problems.</span></button>
+      </div>
+    </div>
+  </section>
+
+  <!-- MIX -->
+  <section class="tab" id="tab-mix" role="tabpanel" aria-labelledby="tab-btn-mix" hidden>
+    <div class="page-bar">
+      <div class="mode-switch" role="radiogroup" aria-label="Detail level">
+        <button type="button" role="radio" aria-checked="true" data-mode="easy">Easy</button>
+        <button type="button" role="radio" aria-checked="false" data-mode="advanced">Advanced</button>
+      </div>
+    </div>
+    <div class="view easy-view">
+      <div class="easy">
+        <div class="easy-head">
+          <h1>Mix your stems</h1>
+          <p>Drop all the stems from one song. They're sorted for you; fix any that land in the wrong spot.</p>
+        </div>
+        <div class="drop big" id="xe-drop" tabindex="0" role="button" aria-label="Add stems">
+          <i class="shape circle"></i>
+          <strong>Drop stems here</strong>
+          <span>or click to choose. They should all start at the same point.</span>
+          <input type="file" id="xe-file" accept="audio/*,.wav,.aif,.aiff,.aifc,.flac,.mp3,.m4a,.ogg" multiple hidden>
+        </div>
+        <div class="easy-stems" id="xe-stems"></div>
+        <div class="drop slim" id="xe-rough-drop" tabindex="0" role="button" aria-label="Add your rough mix">
+          <strong>Your rough mix <span class="opt">optional</span></strong>
+          <span>Your own bounce of this song. MIXIT copies its balance.</span>
+          <input type="file" id="xe-rough-file" accept="audio/*,.wav,.aif,.aiff,.aifc,.flac,.mp3,.m4a,.ogg" hidden>
+        </div>
+        <ul class="file-list" id="xe-rough"></ul>
+        <div class="easy-controls" id="xe-controls"></div>
+        <div class="render-bar">
+          <button class="btn primary big" id="xe-render" disabled>Mix it</button>
+          <div class="progress" id="xe-progress" hidden><div class="loader" aria-hidden="true"><i></i><i></i><i></i></div><div class="bar"><i></i></div><span class="stage"></span></div>
+        </div>
+        <p class="hint center">Comes out at streaming volume (-12 LUFS).</p>
+        <div class="results-slot" id="xe-results-slot"></div>
+      </div>
+    </div>
+    <div class="view adv-view">
+      <div class="workspace">
+        <aside class="panel controls" aria-label="Mixing controls">
+          <div class="card">
+            <h2>Stems</h2>
+            <div class="drop" id="x-drop" tabindex="0" role="button" aria-label="Add stems">
+              <strong>Drop stems here</strong>
+              <span>Stems that start at the same time. Names like "kick", "808", "lead vox", "dbl L" are sorted automatically.</span>
+              <input type="file" id="x-file" accept="audio/*,.wav,.aif,.aiff,.aifc,.flac,.mp3,.m4a,.ogg" multiple hidden>
+            </div>
+            <div class="stem-summary" id="x-summary"></div>
+            <h3>Your rough mix <span class="opt">optional</span></h3>
+            <div class="drop small" id="x-rough-drop" tabindex="0" role="button" aria-label="Add your rough mix">
+              <span>Your own bounce of this song. Levels follow its balance; the tone leans toward it.</span>
+              <input type="file" id="x-rough-file" accept="audio/*,.wav,.aif,.aiff,.aifc,.flac,.mp3,.m4a,.ogg" hidden>
+            </div>
+            <ul class="file-list" id="x-rough"></ul>
+          </div>
+          <div class="card">
+            <h2>Style</h2>
+            <div class="chips" id="x-styles" role="radiogroup" aria-label="Mix style"></div>
+          </div>
+          <div id="x-controls"></div>
+          <div class="card">
+            <h2>Buses</h2>
+            <div class="bus-table" id="x-buses"></div>
+          </div>
+          <div class="card">
+            <h2>Snapshots</h2>
+            <div class="preset-row">
+              <input type="text" id="x-snap-name" placeholder="Snapshot name" maxlength="40" aria-label="Snapshot name">
+              <button class="btn" id="x-snap-save">Save</button>
+            </div>
+            <ul class="preset-list" id="x-snaps"></ul>
+          </div>
+          <div class="render-bar">
+            <button class="btn primary big" id="x-render" disabled>Mix stems</button>
+            <div class="progress" id="x-progress" hidden><div class="loader" aria-hidden="true"><i></i><i></i><i></i></div><div class="bar"><i></i></div><span class="stage"></span></div>
+          </div>
+        </aside>
+        <section class="panel results">
+          <div class="card stems-card">
+            <div class="card-head"><h2>Stem routing</h2><span class="hint" id="x-stem-count"></span></div>
+            <div class="stem-list" id="x-stems"><p class="hint">No stems yet.</p></div>
+          </div>
+          <div class="results-slot" id="x-results-slot"><div class="results-root" id="x-results" aria-live="polite"></div></div>
+        </section>
+      </div>
+    </div>
+  </section>
+
+  <!-- MASTER -->
+  <section class="tab" id="tab-master" role="tabpanel" aria-labelledby="tab-btn-master" hidden>
+    <div class="page-bar">
+      <div class="mode-switch" role="radiogroup" aria-label="Detail level">
+        <button type="button" role="radio" aria-checked="true" data-mode="easy">Easy</button>
+        <button type="button" role="radio" aria-checked="false" data-mode="advanced">Advanced</button>
+      </div>
+    </div>
+    <div class="view easy-view">
+      <div class="easy">
+        <div class="easy-head">
+          <h1>Master a song</h1>
+          <p>Drop a finished mix. MIXIT listens first; then fine-tune with the sliders.</p>
+        </div>
+        <div class="drop big" id="me-drop" tabindex="0" role="button" aria-label="Add songs to master">
+          <i class="shape square"></i>
+          <strong>Drop a song here</strong>
+          <span>or click to choose. Drop a few to master them together.</span>
+          <input type="file" id="me-file" accept="audio/*,.wav,.aif,.aiff,.aifc,.flac,.mp3,.m4a,.ogg,.caf" multiple hidden>
+        </div>
+        <ul class="file-list" id="me-files"></ul>
+        <div class="drop slim" id="me-ref-drop" tabindex="0" role="button" aria-label="Add a song to sound like">
+          <strong>Sound like this song <span class="opt">optional</span></strong>
+          <span>A finished song with a tone you like.</span>
+          <input type="file" id="me-ref-file" accept="audio/*,.wav,.aif,.aiff,.aifc,.flac,.mp3,.m4a,.ogg" hidden>
+        </div>
+        <ul class="file-list" id="me-ref"></ul>
+        <div class="easy-controls" id="me-controls"></div>
+        <div class="render-bar">
+          <button class="btn primary big" id="me-render" disabled>Master it</button>
+          <div class="progress" id="me-progress" hidden><div class="loader" aria-hidden="true"><i></i><i></i><i></i></div><div class="bar"><i></i></div><span class="stage"></span></div>
+        </div>
+        <p class="hint center">Comes out at streaming volume (-12 LUFS).</p>
+        <div class="results-slot" id="me-results-slot"></div>
+      </div>
+    </div>
+    <div class="view adv-view">
+      <div class="workspace">
+        <aside class="panel controls" aria-label="Mastering controls">
+          <div class="card">
+            <h2>Track</h2>
+            <div class="drop" id="m-drop" tabindex="0" role="button" aria-label="Add tracks to master">
+              <strong>Drop tracks here</strong>
+              <span>or click to browse. WAV, AIFF, FLAC, MP3, M4A, OGG. Several files make a release batch.</span>
+              <input type="file" id="m-file" accept="audio/*,.wav,.aif,.aiff,.aifc,.flac,.mp3,.m4a,.ogg,.caf" multiple hidden>
+            </div>
+            <ul class="file-list" id="m-files"></ul>
+            <h3>Reference <span class="opt">optional</span></h3>
+            <div class="drop small" id="m-ref-drop" tabindex="0" role="button" aria-label="Add reference tracks">
+              <span>Drop 1–8 finished songs whose tone, width and loudness you like. Several are averaged.</span>
+              <input type="file" id="m-ref-file" accept="audio/*,.wav,.aif,.aiff,.aifc,.flac,.mp3,.m4a,.ogg" multiple hidden>
+            </div>
+            <ul class="file-list" id="m-ref"></ul>
+            <h3>Sound profile</h3>
+            <div id="m-sound" class="sound-box"></div>
+          </div>
+          <div class="card">
+            <h2>Profile</h2>
+            <div class="chips" id="m-profiles" role="radiogroup" aria-label="Mastering profile"></div>
+            <p class="hint" id="m-profile-hint"></p>
+          </div>
+          <div id="m-controls"></div>
+          <div class="card">
+            <h2>Presets</h2>
+            <div class="preset-row">
+              <input type="text" id="m-preset-name" placeholder="Preset name" maxlength="40" aria-label="Preset name">
+              <button class="btn" id="m-preset-save">Save</button>
+            </div>
+            <ul class="preset-list" id="m-presets"></ul>
+          </div>
+          <div class="render-bar">
+            <button class="btn primary big" id="m-render" disabled>Master track</button>
+            <div class="progress" id="m-progress" hidden><div class="loader" aria-hidden="true"><i></i><i></i><i></i></div><div class="bar"><i></i></div><span class="stage"></span></div>
+          </div>
+        </aside>
+        <section class="panel results">
+          <div class="results-slot" id="m-results-slot">
+            <div class="results-root" id="m-results" aria-live="polite">
+              <div class="empty">
+                <h1>Master a track</h1>
+                <p>Drop a mix on the left, pick a profile, and render. You get a before/after player at matched volume, a full report and your files. Everything is worked out on this computer.</p>
+                <ol class="steps"><li>Add a track, and a reference if you like</li><li>Pick a profile, or Auto to start from what MIXIT hears</li><li>Render, compare, download</li></ol>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </section>
+
+  <!-- ANALYZE -->
+  <section class="tab" id="tab-analyze" role="tabpanel" aria-labelledby="tab-btn-analyze" hidden>
+    <div class="workspace single">
+      <section class="panel results">
+        <div class="easy-head">
+          <h1>Analyze a track</h1>
+          <p>See how loud it is, how it's shaped, and whether anything needs fixing.</p>
+        </div>
+        <div class="card">
+          <div class="drop big" id="a-drop" tabindex="0" role="button" aria-label="Add a track to analyze">
+            <i class="shape triangle"></i>
+            <strong>Drop a track to analyze</strong>
+            <span>Loudness, peaks, tone, width, tempo, and a check for hum, clicks, clipping and noise.</span>
+            <input type="file" id="a-file" accept="audio/*,.wav,.aif,.aiff,.aifc,.flac,.mp3,.m4a,.ogg" hidden>
+          </div>
+          <div class="progress" id="a-progress" hidden><div class="loader" aria-hidden="true"><i></i><i></i><i></i></div><div class="bar"><i></i></div><span class="stage"></span></div>
+        </div>
+        <div class="results-root" id="a-results" aria-live="polite"></div>
+      </section>
+    </div>
+  </section>
+
+  <!-- GUIDE -->
+  <section class="tab" id="tab-guide" role="tabpanel" aria-labelledby="tab-btn-guide" hidden>
+    <div class="workspace single">
+      <article class="panel guide" id="guide"></article>
+    </div>
+  </section>
+</main>
+
+<footer class="site-foot">
+  <b>MIXIT</b>
+  <span>Your audio never leaves your device.</span>
+  <a href="#guide" data-go="guide">How it works</a>
+</footer>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div class="boot-fail" id="boot-fail" role="alert" hidden>MIXIT didn’t start. Hold Shift and reload the page. MIXIT needs a current desktop browser (Chrome, Edge, Safari or Firefox).</div>
+<script>setTimeout(function () { if (!document.documentElement.dataset.ready) document.getElementById('boot-fail').hidden = false; }, 6000);</script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
