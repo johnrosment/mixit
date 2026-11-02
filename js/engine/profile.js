@@ -105,12 +105,17 @@ export function profileSpectrum(profile, N, sr) {
   return { power, N, sr, frames: 1 };
 }
 
-/** Side-gain multipliers per band (low/mid/high) that move a source's width toward the profile. */
+/**
+ * Side-gain multipliers per band (low/mid/high) that move a source's width
+ * toward the profile. Low end is only ever narrowed, and the upper bands widen
+ * a little at most: a reference should nudge a finished mix's image, not redo it.
+ */
+const WIDEN_LIMIT = [1, 1.1, 1.2];
 export function profileWidthFactors(profile, sourceWidthDb, amount = 0.5) {
   return [0, 1, 2].map((b) => {
     const src = sourceWidthDb?.[b];
     if (src == null || src < -40 || amount <= 0) return 1;
     const f = Math.pow(10, ((profile.widthDb[b] - src) / 20) * amount);
-    return Math.max(0.7, Math.min(1.4, f));
+    return Math.max(0.7, Math.min(WIDEN_LIMIT[b], f));
   });
 }

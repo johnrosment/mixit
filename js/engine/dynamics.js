@@ -143,14 +143,23 @@ export function compress(chs, sr, opts = {}) {
 
 /**
  * Three-band compressor. `bands` holds per-band options for compress().
- * Each band's threshold is program-relative to that band's own level.
+ * Each band's threshold is program-relative to that band's own level, and each
+ * band is brought back to the energy it came in with: this evens a range out
+ * over time and leaves the tone to the EQ (compressing hi-hats would otherwise
+ * also darken the whole mix).
  */
 export function multiband(chs, sr, { xLow = 120, xHigh = 2500, bands }) {
   const split = chs.map((ch) => lr4Split3(ch, xLow, xHigh, sr));
   const stats = [];
+  const energy = (arr) => { let e = 0; for (const ch of arr) for (let i = 0; i < ch.length; i++) e += ch[i] * ch[i]; return e; };
   for (let b = 0; b < 3; b++) {
     const bandChs = split.map((s) => s[b]);
-    stats.push(compress(bandChs, sr, bands[b]));
+    const before = energy(bandChs);
+    const st = compress(bandChs, sr, { ...bands[b], makeup: 0 });
+    const after = energy(bandChs);
+    const g = after > 0 ? Math.min(2, Math.sqrt(before / after)) : 1;
+    for (const ch of bandChs) for (let i = 0; i < ch.length; i++) ch[i] *= g;
+    stats.push({ ...st, makeup: 20 * Math.log10(g) });
   }
   chs.forEach((ch, c) => {
     const [lo, mi, hi] = split[c];

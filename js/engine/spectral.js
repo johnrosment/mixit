@@ -203,7 +203,12 @@ export function spectralProcess(chs, sr, { staticCurve = null, resonance = 0, fL
   const prefix = new Float64Array(half + 1);
   const relCoef = Math.exp(-hopSec / 0.12);
   const thr = 5;
-  const maxCut = 3 + 9 * resonance;
+  const maxCut = 2 + 4 * resonance;
+  // A resonance stays on one frequency; a melody moves. Each bin is judged over
+  // about 1.5 s, so changing notes and passing hits are not taken for ringing.
+  const slowCoef = Math.exp(-hopSec / 1.5);
+  const slow = new Float64Array(half);
+  let slowReady = false;
   const kLo = Math.max(2, Math.floor(fLow / binHz));
   const kHi = Math.min(half - 2, Math.ceil(fHigh / binHz));
   const r6 = Math.pow(2, 1 / 6);
@@ -219,14 +224,17 @@ export function spectralProcess(chs, sr, { staticCurve = null, resonance = 0, fL
       for (let k = 0; k < half; k++) g[k] = staticGain ? staticGain[k] : 1;
       if (resonance > 0) {
         let tot = 0;
-        for (let k = 0; k < half; k++) {
-          const p = power[k];
-          dbBuf[k] = p > 1e-20 ? 10 * Math.log10(p) : -200;
-          tot += p;
-          prefix[k + 1] = prefix[k] + dbBuf[k];
-        }
+        for (let k = 0; k < half; k++) tot += power[k];
         const frameActive = tot / half > 1e-11 * N * N;
-        let anyRed = false;
+        if (frameActive) {
+          for (let k = 0; k < half; k++) {
+            const d = power[k] > 1e-20 ? 10 * Math.log10(power[k]) : -200;
+            slow[k] = slowReady ? slowCoef * slow[k] + (1 - slowCoef) * d : d;
+          }
+          slowReady = true;
+        }
+        for (let k = 0; k < half; k++) { dbBuf[k] = slow[k]; prefix[k + 1] = prefix[k] + dbBuf[k]; }
+        let held = 0;
         for (let k = 0; k < half; k++) {
           let target = 0;
           if (frameActive && k >= kLo && k <= kHi) {
@@ -243,13 +251,14 @@ export function spectralProcess(chs, sr, { staticCurve = null, resonance = 0, fL
           const r = (red[k - 1] + 2 * red[k] + red[k + 1]) * 0.25;
           if (r > 0.05) {
             g[k] *= Math.pow(10, -r / 20);
-            anyRed = true;
+            if (r >= 1) held++;
             sumRed += r;
             const band = Math.round(6 * Math.log2((k * binHz) / centers[0]));
             if (band >= 0 && band < centers.length) mapAcc[band] += r;
           }
         }
-        if (anyRed) activeFrames++;
+        // Active: at least 1 dB off in more than a few bins, not a trace on one.
+        if (held >= Math.max(3, 0.01 * (kHi - kLo))) activeFrames++;
       }
       if (staticGain || resonance > 0) {
         for (let k = 0; k < half; k++) {

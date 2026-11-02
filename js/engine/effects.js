@@ -385,7 +385,8 @@ export function delay(inL, inR, sr, { timeMs = 280, feedback = 0.25, pingpong = 
 /** Three-band tone control used by stems, buses and the mastering chain. */
 export function toneEq(chs, sr, { hpf = 0, low = 0, lowFreq = 120, mid = 0, midFreq = 1500, midQ = 0.8, high = 0, highFreq = 7000, tilt = 0, air = 0, extra = [] }) {
   const cs = [];
-  if (hpf > 0) cs.push(design('highpass', hpf, sr, Math.SQRT1_2), design('highpass', hpf, sr, 0.54));
+  // A true 24 dB/oct Butterworth: flat until close to `hpf`, so a rumble filter leaves the lows above it alone.
+  if (hpf > 0) cs.push(design('highpass', hpf, sr, 0.5412), design('highpass', hpf, sr, 1.3066));
   if (low) cs.push(design('lowshelf', lowFreq, sr, 0.7, low));
   if (mid) cs.push(design('peaking', midFreq, sr, midQ, mid));
   if (high) cs.push(design('highshelf', highFreq, sr, 0.7, high));

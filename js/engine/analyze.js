@@ -88,6 +88,24 @@ export function analyze(audio, { progress = () => {}, repairScan = false } = {})
   }
   const samplePeak = Math.max(...peaks);
   const rms = Math.sqrt((rmsCh[0] ** 2 + rmsCh[1] ** 2) / 2);
+  // The song's usual top (10 ms peaks, 99.9th percentile), so one stray hit does
+  // not read as a dynamic mix, and the hits that stand well above it.
+  const peakBlock = Math.max(1, Math.round(sr * 0.01));
+  const blockPeaks = new Float32Array(Math.floor(n / peakBlock));
+  for (let b = 0; b < blockPeaks.length; b++) {
+    let p = 0;
+    for (let j = b * peakBlock; j < (b + 1) * peakBlock; j++) { const v = Math.max(Math.abs(L[j]), Math.abs(R[j])); if (v > p) p = v; }
+    blockPeaks[b] = p;
+  }
+  const usualTop = blockPeaks.length ? Float32Array.from(blockPeaks).sort()[Math.floor(blockPeaks.length * 0.999)] : samplePeak;
+  const outliers = [];
+  if (usualTop > 0) {
+    for (let b = 0; b < blockPeaks.length; b++) {
+      if (blockPeaks[b] < usualTop * Math.SQRT2) continue; // 3 dB over
+      const t = (b * peakBlock) / sr, overDb = lin2db(blockPeaks[b] / usualTop), last = outliers[outliers.length - 1];
+      if (last && t - last.t < 0.25) { if (overDb > last.overDb) last.overDb = overDb; } else outliers.push({ t, overDb });
+    }
+  }
   const hop = Math.round(sr * 0.1);
   let silentHops = 0, hops = 0;
   for (let i = 0; i < n; i += hop) {
@@ -257,6 +275,8 @@ export function analyze(audio, { progress = () => {}, repairScan = false } = {})
       rmsDbfs: lin2db(rms),
       rmsPerChannel: rmsCh.map(lin2db),
       crestDb: lin2db(samplePeak) - lin2db(rms),
+      bodyCrestDb: lin2db(usualTop || samplePeak) - lin2db(rms),
+      outliers: outliers.length <= 5 ? outliers : [],
       plrDb: tp.dbtp - loud.integrated,
       dcOffsetPct: dc.map((d) => d * 100),
       clippedSamples: clipped,
@@ -287,7 +307,7 @@ export function suggest(m) {
   const s = {};
   const why = [];
   const I = m.loudness.integrated;
-  const crest = m.level.crestDb;
+  const crest = m.level.bodyCrestDb ?? m.level.crestDb;
   const t = m.spectrum.tonal;
   if (I < -30) why.push(`Input is very quiet (${I.toFixed(1)} LUFS). It is gain-staged before processing so the dynamics stages see a normal level.`);
   if (m.level.clipEvents > 0) why.push(`${m.level.clipEvents} clipping event(s) detected in the source. Processing cannot restore clipped peaks; re-export without clipping if possible.`);
@@ -305,7 +325,7 @@ export function suggest(m) {
     // single-band compressor does less harm otherwise.
     const uneven = m.bandDynamics?.unevennessDb ?? 0;
     if (uneven >= 3) {
-      s.multiband = Math.round(Math.min(0.55, 0.15 + 0.06 * uneven) * 20) / 20;
+      s.multiband = Math.round(Math.min(0.35, 0.1 + 0.03 * uneven) * 20) / 20;
       const names = ['lows', 'mids', 'highs'];
       const worst = names[m.bandDynamics.spreadsDb.indexOf(Math.max(...m.bandDynamics.spreadsDb))];
       why.push(`The ${worst} rise and fall ${uneven.toFixed(1)} dB more than the mix as a whole: multiband compression (${Math.round(s.multiband * 100)}%) evens that range out.`);

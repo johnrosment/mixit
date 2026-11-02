@@ -53,6 +53,7 @@ export const VARIATION_OVERRIDES = {
 // level set by the peak, as one short hit has no meaningful average loudness.
 const SOUND_OVERRIDES = { multiband: 0, glue: 0, deess: 0, resonance: 0, sectionDyn: 0, hfReserve: 0, saturation: 0, balanceRepair: false, bandBalance: false, hpf: 20, attack: 0, sustain: 0, deBox: 0, bassDebloom: 0 };
 const SHORT_SOUND_SEC = 6;
+const REF_MAX_DB = 3;
 
 // Vinyl / cassette pre-master: summed low end, more sibilance control, a
 // gentler loudness target and protected headroom.
@@ -249,9 +250,9 @@ function processChain(input, sr, s, { profile, progress, inputAnalysis }) {
     progress('Matching the sound profile', 0.36);
     const srcSpec = ltas(chs, sr);
     const refSpec = profileSpectrum(profile, srcSpec.N, sr);
-    // Kept within ±4 dB: a bigger difference is better fixed in the mix.
+    // Kept within ±3 dB: a bigger difference is better fixed in the mix.
     const wide = referenceCurve(srcSpec, refSpec, { strength: s.refStrength, maxDb: 12 });
-    staticCurve = referenceCurve(srcSpec, refSpec, { strength: s.refStrength, maxDb: 4 });
+    staticCurve = referenceCurve(srcSpec, refSpec, { strength: s.refStrength, maxDb: REF_MAX_DB });
     const wantMax = Math.max(...Array.from(wide, Math.abs));
     const binHz = sr / srcSpec.N;
     if (guard) {
@@ -269,7 +270,7 @@ function processChain(input, sr, s, { profile, progress, inputAnalysis }) {
     };
     const biggest = [...curvePts].sort((a, b) => Math.abs(b.db) - Math.abs(a.db)).slice(0, 3);
     const label = profile.name ? `sound profile “${profile.name}”` : profile.count > 1 ? `the average of ${profile.count} references` : 'the reference';
-    log('Reference match', `Tonal balance moved ${Math.round(s.refStrength * 100)}% toward ${label}. Largest moves: ${biggest.map((p) => `${fmt(p.db)} dB at ${p.freq} Hz`).join(', ')}.${wantMax > 4.5 ? ` Matching fully would take up to ${wantMax.toFixed(1)} dB; the master stops at 4 dB, as a bigger change sounds better made in the mix.` : ''}${guard ? ` Boosts above ${(bw.bandwidthHz / 1000).toFixed(1)} kHz were removed by the bandwidth guard.` : ''}`, { curve: curvePts });
+    log('Reference match', `Tonal balance moved ${Math.round(s.refStrength * 100)}% toward ${label}. Largest moves: ${biggest.map((p) => `${fmt(p.db)} dB at ${p.freq} Hz`).join(', ')}.${wantMax > REF_MAX_DB + 0.5 ? ` Matching fully would take up to ${wantMax.toFixed(1)} dB; the master stops at ${REF_MAX_DB} dB, as a bigger change sounds better made in the mix.` : ''}${guard ? ` Boosts above ${(bw.bandwidthHz / 1000).toFixed(1)} kHz were removed by the bandwidth guard.` : ''}`, { curve: curvePts });
   }
 
   let resonanceReport = null;
@@ -332,10 +333,12 @@ function processChain(input, sr, s, { profile, progress, inputAnalysis }) {
     const a = s.multiband;
     mb = multiband(chs, sr, {
       xLow: s.xLow, xHigh: s.xHigh,
+      // Full-mix ratios (1.1 to 2.0), threshold just above the band's usual level,
+      // and only a few dB at most, on a mix that should already work.
       bands: [
-        { ratio: 1.5 + 2.5 * a, attack: 25, release: 180, knee: 8, rmsMs: 10, thresholdPct: 0.75, thresholdOffset: -6 * a },
-        { ratio: 1.4 + 2 * a, attack: 12, release: 140, knee: 8, rmsMs: 5, thresholdPct: 0.75, thresholdOffset: -6 * a },
-        { ratio: 1.4 + 2 * a, attack: 4, release: 90, knee: 8, rmsMs: 3, thresholdPct: 0.75, thresholdOffset: -6 * a },
+        { ratio: 1.2 + a, attack: 25, release: 180, knee: 8, rmsMs: 10, thresholdPct: 0.85, thresholdOffset: -3 * a, maxGr: 3 + 3 * a },
+        { ratio: 1.15 + 0.85 * a, attack: 12, release: 140, knee: 8, rmsMs: 5, thresholdPct: 0.85, thresholdOffset: -3 * a, maxGr: 3 + 3 * a },
+        { ratio: 1.15 + 0.85 * a, attack: 8, release: 90, knee: 8, rmsMs: 5, thresholdPct: 0.85, thresholdOffset: -3 * a, maxGr: 3 + 3 * a },
       ],
     });
     const names = ['Low', 'Mid', 'High'];
@@ -345,7 +348,7 @@ function processChain(input, sr, s, { profile, progress, inputAnalysis }) {
   progress('Glue compression', 0.7);
   let glue = null;
   if (s.glue > 0.01) {
-    glue = compress(chs, sr, { ratio: 1.3 + 1.2 * s.glue, attack: 30, release: 200, knee: 10, rmsMs: 15, thresholdPct: 0.7, thresholdOffset: -4 * s.glue });
+    glue = compress(chs, sr, { ratio: 1.2 + 0.8 * s.glue, attack: 30, release: 200, knee: 10, rmsMs: 15, thresholdPct: 0.7, thresholdOffset: -4 * s.glue });
     log('Glue compression', `Average ${glue.avgGr.toFixed(1)} dB, max ${glue.maxGr.toFixed(1)} dB at ${glue.ratio.toFixed(2)}:1 with slow attack to keep transients.`, stripCurve(glue));
   }
 
@@ -432,6 +435,8 @@ export function master(audio, settings, { references = [], profile = null, deliv
       s[k] = v;
       autoApplied[k] = v;
     }
+    // Low-mid clean-up already on: a second, static cut there would double it.
+    if (s.deBox > 0.01 && s.deMud > 0 && !locked.has('deMud')) { s.deMud = 0; autoApplied.deMud = 0; }
   }
   if (soundMode) Object.assign(s, SOUND_OVERRIDES);
 
@@ -470,7 +475,15 @@ export function master(audio, settings, { references = [], profile = null, deliv
   });
   const warnings = [];
   if (!soundMode && s.targetLufs > -14 && s.ceiling > -2) warnings.push(`At ${s.targetLufs} LUFS, Spotify advises a peak limit of -2 dBTP or lower, as louder masters distort more when encoded for streaming. This one is set to ${s.ceiling}.`);
-  if (fin.limiter.maxGr > 8 || fin.limiter.avgGr > 2) warnings.push(`The limiter is working hard to reach ${s.targetLufs} LUFS (up to ${fin.limiter.maxGr.toFixed(1)} dB, ${fin.limiter.avgGr.toFixed(1)} dB on average; 1-3 dB is the comfortable range). Hits may sound flattened. A slightly lower loudness target will keep more punch and feeling.`);
+  // Judged on its busiest moments, not its one biggest: a lone hit can take many dB without the song being squashed.
+  const grs = Array.from(fin.limiter.curve, (v) => -v).sort((a, b) => a - b);
+  const busy = grs.length ? grs[Math.floor(grs.length * 0.99)] : 0;
+  if (busy > 6 || fin.limiter.avgGr > 2) warnings.push(`The limiter is working hard to reach ${s.targetLufs} LUFS (${busy.toFixed(1)} dB at its busiest, ${fin.limiter.avgGr.toFixed(1)} dB on average; 1-3 dB is the comfortable range). Hits may sound flattened. A slightly lower loudness target will keep more punch and feeling.`);
+  const outliers = inputAnalysis.level.outliers || [];
+  if (!soundMode && outliers.length && fin.limiter.maxGr > 3) {
+    const at = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
+    warnings.push(`${outliers.length === 1 ? 'One hit' : `${outliers.length} hits`} (at ${outliers.map((o) => at(o.t)).join(', ')}) ${outliers.length === 1 ? 'stands' : 'stand'} up to ${Math.max(...outliers.map((o) => o.overDb)).toFixed(0)} dB above everything else in the song. The limiter catches ${outliers.length === 1 ? 'it' : 'them'}, but it may be worth a listen in the mix.`);
+  }
   if (!soundMode && Math.abs(fin.achievedLufs - s.targetLufs) > 0.5) warnings.push(`Target ${s.targetLufs} LUFS could not be reached exactly (got ${fin.achievedLufs.toFixed(2)} LUFS).`);
 
   progress('Analysing the master', 0.88);
