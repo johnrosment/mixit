@@ -848,12 +848,12 @@ export function initMix({ engine, sendToMaster, onMode }) {
     const f = rough.fit;
     const lines = [];
     if (!f) lines.push('Your rough mix was loaded, but “Even out the levels” is off, so only its tone was used.');
-    else if (f.rejected) lines.push('Your rough mix did not line up with these stems, so the standard balance was used. Check that it is a bounce of the same song from the same starting point.');
+    else if (f.rejected) lines.push('Your rough mix did not line up with these stems, so it was not used. Check that it is a bounce of the same song from the same starting point.');
     else {
       const notes = [Math.abs(f.lagSec) >= 0.02 ? `it starts ${Math.abs(f.lagSec).toFixed(2)} s ${f.lagSec > 0 ? 'later' : 'earlier'} than the stems` : null, f.errDb >= 0.1 ? `matched to within ${fx(f.errDb, 1)} dB` : null].filter(Boolean);
       lines.push(`Levels follow your rough mix${notes.length ? ` (${notes.join('; ')})` : ''}.`);
     }
-    if (rough.tone) lines.push(`The final tone was moved ${Math.round(rough.tone.strength * 100)}% toward it, never more than 4 dB.`);
+    if (rough.tone) lines.push(`The final tone moved toward it at ${Math.round(rough.tone.strength * 100)}% strength, ${fx(4 * rough.tone.strength, 1)} dB at most.`);
     const card = section('Your rough mix', el('p', { class: 'hint' }, lines.join(' ')));
     if (rough.tone) {
       const c = curveChart('Tone moves toward your rough mix', 'EQ applied to the finished mix (dB).', rough.tone.curve.map((p) => p.freq), rough.tone.curve.map((p) => p.db));

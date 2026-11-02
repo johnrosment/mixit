@@ -26,6 +26,8 @@ const BUS_TARGETS = { vocals: -18, drums: -20, bass: -21, music: -19.5, fx: -27,
 const POST_TARGETS = { vocals: -20, drums: -27, bass: -27, music: -25, fx: -26, ambience: -32 };
 const VOICE_LUFS = -24; // each voice is brought to this before the bus, so speakers match
 const SUPPORT_OFFSET = -6; // doubles/backing relative to lead vocal
+const ROUGH_MAX_ERR_DB = 4; // a rough mix further from the stems than this is the wrong file
+const ROUGH_MAX_DB = 4; // the most its tone can move the finished mix
 // Video, ad and podcast stems that get click removal and edit fades.
 const EDIT_KINDS = { vocals: 'dialogue', fx: 'effects', ambience: 'ambience' };
 
@@ -289,12 +291,16 @@ export class MixSession {
       if (r) log.push(`Dialogue peaks lowered ${r.dropDb.toFixed(1)} dB by rotating their phase; loudness and tone are unchanged.`);
     }
 
+    // --- Does your rough mix belong to these stems? A wrong file steers nothing. ---
+    const roughFit = this.rough ? fitBalance(Object.fromEntries(BUS_KEYS.filter((k) => this.roughBus[k]).map((k) => [k, this.roughBus[k]])), this.rough) : null;
+    const roughOk = !!roughFit && roughFit.errDb <= ROUGH_MAX_ERR_DB;
+
     // --- Vocal lead / support balance ---
     progress('Balancing vocals', 0.05);
     const leadLufs = this.used.vocalLead ? integratedLufs(B.vocalLead, sr) : null;
     const supportLufs = this.used.vocalSupport ? integratedLufs(B.vocalSupport, sr) : null;
     // (With your rough mix, its own lead/backing balance is kept instead.)
-    if (balance && !this.rough && leadLufs != null && supportLufs != null && supportLufs > -70) {
+    if (balance && !roughOk && leadLufs != null && supportLufs != null && supportLufs > -70) {
       const g = leadLufs + SUPPORT_OFFSET - supportLufs;
       gain(B.vocalSupport, g);
       log.push(`Doubles/backing balanced ${fmt(SUPPORT_OFFSET)} LU under the lead (${fmt(g)} dB).`);
@@ -319,22 +325,20 @@ export class MixSession {
     const targets = post ? POST_TARGETS : BUS_TARGETS;
     const even = (k) => Math.max(-40, Math.min(40, targets[k] - before[k]));
     let rough = null;
-    if (balance && this.rough) {
+    if (this.rough && !roughOk) {
+      rough = { ...(roughFit || {}), rejected: true };
+      log.push(`Your rough mix did not line up with these stems${roughFit ? ` (level error ${roughFit.errDb.toFixed(1)} dB)` : ''}, so it was not used. Check that it is a bounce of the same song from the same start point.`);
+    } else if (balance && this.rough) {
       progress('Matching your rough mix', 0.1);
-      const fit = fitBalance(Object.fromEntries(keys.filter((k) => this.roughBus[k]).map((k) => [k, this.roughBus[k]])), this.rough);
-      if (fit && fit.errDb <= 4) {
-        // Each processed bus goes to its loudness in the rough mix, then all are
-        // shifted together so the sum lands where the even balance would. A bus
-        // you left out of the rough mix stays 24 dB under its even level.
-        const target = (k) => (Number.isFinite(fit.lufs[k]) ? fit.lufs[k] - before[k] : -Infinity);
-        const tot = (f) => 10 * Math.log10(keys.reduce((a, k) => a + Math.pow(10, f(k) / 10), 0));
-        const shift = tot((k) => targets[k]) - tot((k) => before[k] + Math.max(target(k), even(k) - 24));
-        rough = { ...fit, gains: Object.fromEntries(keys.map((k) => [k, Math.max(-40, Math.min(40, Math.max(target(k) + shift, even(k) - 24)))])) };
-        log.push(`Balance from your rough mix (lined up${Math.abs(fit.lagSec) >= 0.02 ? ` with a ${fit.lagSec.toFixed(2)} s offset` : ''}, fits within ${fit.errDb.toFixed(1)} dB): ${keys.map((k) => `${k} ${fmt(rough.gains[k])} dB`).join(', ')}.`);
-      } else {
-        rough = { ...(fit || {}), rejected: true };
-        log.push(`Your rough mix did not line up with these stems${fit ? ` (level error ${fit.errDb.toFixed(1)} dB)` : ''}, so the standard balance was used. Check that it is a bounce of the same song from the same start point.`);
-      }
+      const fit = roughFit;
+      // Each processed bus goes to its loudness in the rough mix, then all are
+      // shifted together so the sum lands where the even balance would. A bus
+      // you left out of the rough mix stays 24 dB under its even level.
+      const target = (k) => (Number.isFinite(fit.lufs[k]) ? fit.lufs[k] - before[k] : -Infinity);
+      const tot = (f) => 10 * Math.log10(keys.reduce((a, k) => a + Math.pow(10, f(k) / 10), 0));
+      const shift = tot((k) => targets[k]) - tot((k) => before[k] + Math.max(target(k), even(k) - 24));
+      rough = { ...fit, gains: Object.fromEntries(keys.map((k) => [k, Math.max(-40, Math.min(40, Math.max(target(k) + shift, even(k) - 24)))])) };
+      log.push(`Balance from your rough mix (lined up${Math.abs(fit.lagSec) >= 0.02 ? ` with a ${fit.lagSec.toFixed(2)} s offset` : ''}, fits within ${fit.errDb.toFixed(1)} dB): ${keys.map((k) => `${k} ${fmt(rough.gains[k])} dB`).join(', ')}.`);
     }
     const amount = s.balanceAmount ?? 1;
     for (const key of keys) {
@@ -625,10 +629,10 @@ export class MixSession {
 
     // --- Tone of your rough mix (static EQ toward its long-term spectrum) ---
     let roughTone = null;
-    if (this.rough && (s.roughTone || 0) > 0.01) {
+    if (roughOk && (s.roughTone || 0) > 0.01) {
       progress('Matching your rough mix tone', 0.74);
       const spec = ltas(mix, sr);
-      roughCurve = referenceCurve(spec, this.rough.spec, { strength: s.roughTone, maxDb: 4, fraction: 2 });
+      roughCurve = referenceCurve(spec, this.rough.spec, { strength: s.roughTone, maxDb: ROUGH_MAX_DB, fraction: 2 });
       const res = spectralProcess(mix, sr, { staticCurve: roughCurve });
       mix[0] = res.chs[0];
       mix[1] = res.chs[1];
@@ -636,7 +640,7 @@ export class MixSession {
       const pts = bandCenters(3, 31.5, 16000).map((f) => ({ freq: Math.round(f), db: roughCurve[Math.min(roughCurve.length - 1, Math.round(f / binHz))] }));
       roughTone = { strength: s.roughTone, curve: pts };
       const big = [...pts].sort((a, b) => Math.abs(b.db) - Math.abs(a.db)).slice(0, 3);
-      log.push(`Tone moved ${Math.round(s.roughTone * 100)}% toward your rough mix (at most 4 dB). Largest moves: ${big.map((p) => `${fmt(p.db)} dB at ${p.freq} Hz`).join(', ')}.`);
+      log.push(`Tone moved toward your rough mix at ${Math.round(s.roughTone * 100)}% strength (${(ROUGH_MAX_DB * s.roughTone).toFixed(1)} dB at most). Largest moves: ${big.map((p) => `${fmt(p.db)} dB at ${p.freq} Hz`).join(', ')}.`);
     }
 
     // --- Output stage ---

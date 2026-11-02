@@ -40,7 +40,7 @@ export const GUIDE_HTML = `
 <h2>Mastering a song</h2>
 <ul>
   <li>MIXIT listens to the track first and sets a starting point: brightness, muddiness cleanup, softening of harsh "s" sounds, compression and centred bass. Anything you change by hand is kept.</li>
-  <li><b>Sound like this song</b> (optional): drop a finished song you like and the tone leans toward it. In Advanced you can average up to eight references and save them as a sound profile.</li>
+  <li><b>Sound like this song</b> (optional): drop a finished song you like, ideally in a similar style, and the tone leans toward it. Your own tone moves stay on top. In Advanced you can average up to eight references and save them as a sound profile.</li>
   <li>Repair tools (clicks, hum, clipping, noise) are always off until you turn them on.</li>
   <li><b>Reverb</b> adds a touch of room to the whole song (the bass stays dry). <b>Vintage tape</b> adds warmth and a softer top; <b>tape hiss</b> adds faint tape noise, heard mostly in quiet parts.</li>
 </ul>
@@ -95,7 +95,7 @@ export const GUIDE_HTML = `
   <li><b>Analysis.</b> BS.1770-4 / EBU R128 loudness and range, 4× oversampled true peak, crest factor, per-band correlation and mono loss, spectral slope, bandwidth, sibilance, tempo, spectrogram and a repair scan.</li>
   <li><b>Repair (opt-in).</b> Stereo delay (cross-correlation, up to 1.5 ms), clipped peaks (Burg prediction from both sides), clicks (linear-prediction residual), hum (50/60 Hz series with narrow cuts), noise (spectral subtraction from a learned floor), per-band L/R balance and a bandwidth guard.</li>
   <li><b>Gain staging and tone.</b> Input brought to about −20 LUFS; high-pass, shelves, bell, tilt, air and a broad low-mid cut.</li>
-  <li><b>Reference match.</b> Loudness-normalised spectra smoothed to 1/3 octave; a capped (±8 dB) curve applied in the frequency domain. Width can be matched per band.</li>
+  <li><b>Reference match.</b> Both spectra are compared an octave at a time, before your EQ, so your own moves stay on top. A soft-limited curve, ±3 dB at most (±2.1 dB at the default strength), is applied in the frequency domain. A steep wall in either song's highs is ignored. Width can be matched per band, up to ±2 dB of side level.</li>
   <li><b>2× processing (optional).</b> The chain and limiter run at twice the rate through a 143-tap linear-phase half-band filter, with a final limiter pass at the source rate.</li>
   <li><b>Dynamics.</b> Resonance control, dynamic low-mid de-box, de-esser, attack/sustain shaping, bass de-bloom, three-band Linkwitz-Riley compression, glue, and section-aware outlier control.</li>
   <li><b>Character and width.</b> An optional plate reverb on the whole song (high-passed at 300 Hz, level set against the song's loudness), 2× oversampled tape, tube or soft-clip saturation, seeded and shaped tape hiss, per-band width with correlation protection and mono bass.</li>

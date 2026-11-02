@@ -16,6 +16,8 @@ export const PROFILE_GRID = (() => {
 })();
 
 const WIDTH_BANDS = [[20, 200], [200, 4000], [4000, 20000]];
+const NO_WIDTH_DB = -40;
+const WIDTH_MOVE_DB = 2;
 
 function stereoPair(audio) {
   return audio.channels.length > 1 ? audio.channels.slice(0, 2) : [audio.channels[0], audio.channels[0]];
@@ -31,6 +33,7 @@ function measure(audio) {
   const chs = stereoPair(audio);
   const spec = ltas(chs, sr, { stereo: true });
   const loud = measureLoudness(chs, sr, { series: false });
+  if (!(loud.integrated > -70)) return null;
   const tp = truePeak(chs, sr);
   const { N } = spec;
   const binHz = sr / N;
@@ -52,10 +55,12 @@ function measure(audio) {
   return { densityDb, lufs: loud.integrated, lra: loud.lra, plr: tp.dbtp - loud.integrated, widthDb, durationSec: chs[0].length / sr };
 }
 
-/** Learn a profile from 1-8 reference tracks ({ sr, channels }). */
+/** Learn a profile from 1-8 reference tracks ({ sr, channels }). Silent files are left out; null if nothing is left. */
 export function learnProfile(audios, { name = '', names = [] } = {}) {
   if (!audios.length) throw new Error('A sound profile needs at least one reference track.');
-  const ms = audios.map(measure);
+  const measured = audios.map(measure);
+  const ms = measured.filter(Boolean);
+  if (!ms.length) return null;
   const densityDb = PROFILE_GRID.map((_, i) => {
     const v = ms.map((m) => m.densityDb[i]).filter((x) => x != null);
     return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
@@ -73,7 +78,7 @@ export function learnProfile(audios, { name = '', names = [] } = {}) {
   return {
     version: 1,
     name,
-    sources: names,
+    sources: names.filter((_, i) => measured[i]),
     count: ms.length,
     created: new Date().toISOString(),
     grid: PROFILE_GRID,
@@ -82,7 +87,11 @@ export function learnProfile(audios, { name = '', names = [] } = {}) {
     lufs: mean((m) => m.lufs),
     lra: mean((m) => m.lra),
     plr: mean((m) => m.plr),
-    widthDb: [0, 1, 2].map((b) => mean((m) => m.widthDb[b])),
+    // A mono file has no width to average in.
+    widthDb: [0, 1, 2].map((b) => {
+      const v = ms.map((m) => m.widthDb[b]).filter((w) => w > NO_WIDTH_DB);
+      return v.length ? v.reduce((a, w) => a + w, 0) / v.length : -120;
+    }),
   };
 }
 
@@ -107,15 +116,16 @@ export function profileSpectrum(profile, N, sr) {
 
 /**
  * Side-gain multipliers per band (low/mid/high) that move a source's width
- * toward the profile. Low end is only ever narrowed, and the upper bands widen
- * a little at most: a reference should nudge a finished mix's image, not redo it.
+ * toward the profile. Low end is only ever narrowed, and the side level moves
+ * 2 dB at most, scaled by `amount`: a reference should nudge a finished mix's
+ * image, not redo it. A mono source or reference says nothing about width.
  */
-const WIDEN_LIMIT = [1, 1.1, 1.2];
 export function profileWidthFactors(profile, sourceWidthDb, amount = 0.5) {
   return [0, 1, 2].map((b) => {
-    const src = sourceWidthDb?.[b];
-    if (src == null || src < -40 || amount <= 0) return 1;
-    const f = Math.pow(10, ((profile.widthDb[b] - src) / 20) * amount);
-    return Math.max(0.7, Math.min(WIDEN_LIMIT[b], f));
+    const src = sourceWidthDb?.[b], ref = profile.widthDb[b];
+    if (src == null || src < NO_WIDTH_DB || ref < NO_WIDTH_DB || amount <= 0) return 1;
+    const db = Math.max(-WIDTH_MOVE_DB, Math.min(WIDTH_MOVE_DB, ref - src)) * amount;
+    const f = Math.pow(10, db / 20);
+    return b === 0 ? Math.min(1, f) : f;
   });
 }

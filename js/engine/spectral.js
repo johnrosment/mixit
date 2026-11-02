@@ -143,46 +143,82 @@ function smoothOctave(db, binHz, fraction) {
   return out;
 }
 
+// Mean power over a constant fractional-octave window, in dB.
+function octavePowerDb(power, fraction) {
+  const n = power.length;
+  const prefix = new Float64Array(n + 1);
+  for (let k = 0; k < n; k++) prefix[k + 1] = prefix[k] + power[k];
+  const r = Math.pow(2, 1 / (2 * fraction));
+  const out = new Float64Array(n);
+  for (let k = 1; k < n; k++) {
+    const lo = Math.max(1, Math.floor(k / r));
+    const hi = Math.min(n - 1, Math.max(lo, Math.ceil(k * r)));
+    const v = (prefix[hi + 1] - prefix[lo]) / (hi - lo + 1);
+    out[k] = v > 1e-20 ? 10 * Math.log10(v) : -200;
+  }
+  out[0] = out[1] ?? 0;
+  return out;
+}
+
+// Where a spectrum hits a steep wall in the highs. A lossy file or an old
+// transfer stops there, and that is not a tone to copy.
+function wallHz(db, binHz) {
+  const step = Math.pow(2, 0.25);
+  for (let k = Math.ceil(8000 / binHz); Math.round(k * step) < db.length; k++) {
+    if (db[k] - db[Math.round(k * step)] >= 15) return k * binHz;
+  }
+  return Infinity;
+}
+
 /**
  * Static matching curve (dB per bin) that moves the source's tonal balance toward
- * the reference. Overall level difference is removed (tonal match only).
+ * the reference. Overall level difference is removed (tonal match only). `fraction`
+ * is the smoothing in octaves: broad enough not to copy another song's bass notes.
+ * The move stays under `maxDb` at full strength and scales with `strength` below it.
  */
-export function referenceCurve(srcSpec, refSpec, { strength = 0.7, maxDb = 8, fraction = 3 } = {}) {
+export function referenceCurve(srcSpec, refSpec, { strength = 0.7, maxDb = 3, fraction = 1 } = {}) {
   const { N, sr } = srcSpec;
   const binHz = sr / N;
   const half = srcSpec.power.length;
-  const toDb = (p) => Array.from(p, (v) => (v > 1e-20 ? 10 * Math.log10(v) : -200));
   // Resample the reference spectrum to the source bin grid if frame sizes differ.
-  const refDbRaw = toDb(refSpec.power);
   const refBinHz = refSpec.sr / refSpec.N;
-  const refDb = new Float64Array(half);
+  const refPower = new Float64Array(half);
   for (let k = 0; k < half; k++) {
     const pos = (k * binHz) / refBinHz;
-    const i0 = Math.min(refDbRaw.length - 1, Math.floor(pos));
-    const i1 = Math.min(refDbRaw.length - 1, i0 + 1);
+    const i0 = Math.min(refSpec.power.length - 1, Math.floor(pos));
+    const i1 = Math.min(refSpec.power.length - 1, i0 + 1);
     const t = pos - i0;
-    refDb[k] = refDbRaw[i0] * (1 - t) + refDbRaw[i1] * t;
+    refPower[k] = refSpec.power[i0] * (1 - t) + refSpec.power[i1] * t;
   }
-  const s = smoothOctave(Float64Array.from(toDb(srcSpec.power)), binHz, fraction);
-  const r = smoothOctave(refDb, binHz, fraction);
+  // Both measured the same way, so a song against itself comes out flat.
+  const s = octavePowerDb(srcSpec.power, 12);
+  const r = octavePowerDb(refPower, 12);
+  // Only where both have something to say: the difference is held beyond that, then faded out below.
+  const kLo = Math.ceil(40 / binHz);
+  const kHi = Math.min(half - 1, Math.floor(Math.min(16000, wallHz(s, binHz), wallHz(r, binHz)) / binHz));
   const diff = new Float64Array(half);
+  for (let k = kLo; k <= kHi; k++) diff[k] = r[k] - s[k];
+  diff.fill(diff[kLo], 0, kLo);
+  diff.fill(diff[kHi], kHi + 1);
+  const broad = smoothOctave(diff, binHz, fraction);
+  // The level-neutral point counts every octave evenly: counting bins would let 2-8 kHz decide it.
   let wsum = 0, dsum = 0;
   for (let k = 1; k < half; k++) {
-    diff[k] = r[k] - s[k];
     const f = k * binHz;
-    if (f >= 100 && f <= 8000) { dsum += diff[k]; wsum++; }
+    if (f >= 100 && f <= 8000) { dsum += broad[k] / k; wsum += 1 / k; }
   }
   const offset = wsum ? dsum / wsum : 0;
+  const fHi = kHi * binHz;
   const curve = new Float64Array(half);
   for (let k = 0; k < half; k++) {
     const f = k * binHz;
-    let d = (diff[k] - offset) * strength;
-    d = Math.max(-maxDb, Math.min(maxDb, d));
-    // Fade the correction out below 30 Hz and above 16 kHz.
+    const d = broad[k] - offset;
+    // A soft limit before the strength: big differences keep their order and the strength always scales the move.
+    const limited = (maxDb * d) / Math.sqrt(maxDb * maxDb + d * d);
     let fade = 1;
-    if (f < 30) fade = Math.max(0, f / 30);
-    if (f > 16000) fade = Math.max(0, 1 - (f - 16000) / 4000);
-    curve[k] = d * fade;
+    if (f < 40) fade = Math.max(0, (f - 20) / 20);
+    if (f > fHi) fade = Math.max(0, 1 - (f - fHi) / (0.25 * fHi));
+    curve[k] = strength * limited * fade;
   }
   return smoothOctave(curve, binHz, fraction * 2);
 }

@@ -54,6 +54,7 @@ export const VARIATION_OVERRIDES = {
 const SOUND_OVERRIDES = { multiband: 0, glue: 0, deess: 0, resonance: 0, sectionDyn: 0, hfReserve: 0, saturation: 0, balanceRepair: false, bandBalance: false, hpf: 20, attack: 0, sustain: 0, deBox: 0, bassDebloom: 0 };
 const SHORT_SOUND_SEC = 6;
 const REF_MAX_DB = 3;
+const REF_FAR_DB = 10;
 
 // Vinyl / cassette pre-master: summed low end, more sibilance control, a
 // gentler loudness target and protected headroom.
@@ -210,6 +211,8 @@ function processChain(input, sr, s, { profile, progress, inputAnalysis }) {
   dcBlock(chs, sr, 5);
   log('Gain staging', `Brought the input from ${inputAnalysis.loudness.integrated.toFixed(1)} LUFS to about -20 LUFS (${stageGain >= 0 ? '+' : ''}${stageGain.toFixed(1)} dB) and removed DC offset.`, { gainDb: stageGain });
   progress('Tone shaping', 0.3);
+  // Measured before your EQ, so the reference moves the song and your own moves stay on top.
+  const srcSpec = profile ? ltas(chs, sr) : null;
 
   const bw = inputAnalysis.spectrum.bandwidth;
   const guard = s.bandwidthGuard && bw?.limited;
@@ -248,12 +251,10 @@ function processChain(input, sr, s, { profile, progress, inputAnalysis }) {
   let hfBoost = s.high > 0 || tilt > 0 || air > 0;
   if (profile) {
     progress('Matching the sound profile', 0.36);
-    const srcSpec = ltas(chs, sr);
     const refSpec = profileSpectrum(profile, srcSpec.N, sr);
     // Kept within ±3 dB: a bigger difference is better fixed in the mix.
-    const wide = referenceCurve(srcSpec, refSpec, { strength: s.refStrength, maxDb: 12 });
     staticCurve = referenceCurve(srcSpec, refSpec, { strength: s.refStrength, maxDb: REF_MAX_DB });
-    const wantMax = Math.max(...Array.from(wide, Math.abs));
+    const differenceDb = Math.max(...Array.from(referenceCurve(srcSpec, refSpec, { strength: 1, maxDb: 1000 }), Math.abs));
     const binHz = sr / srcSpec.N;
     if (guard) {
       const kb = Math.floor((bw.bandwidthHz * 0.95) / binHz);
@@ -264,13 +265,14 @@ function processChain(input, sr, s, { profile, progress, inputAnalysis }) {
     const curvePts = centers.map((f) => ({ freq: Math.round(f), db: staticCurve[Math.min(staticCurve.length - 1, Math.round(f / binHz))] }));
     refInfo = {
       curve: curvePts,
+      differenceDb,
       referenceLufs: 0,
       referenceBands: bandLevels(refSpec, bandCenters(6, 20, Math.min(20000, sr * 0.48)), 6),
       profile: { name: profile.name, count: profile.count, sources: profile.sources, lufs: profile.lufs, lra: profile.lra, plr: profile.plr, widthDb: profile.widthDb },
     };
     const biggest = [...curvePts].sort((a, b) => Math.abs(b.db) - Math.abs(a.db)).slice(0, 3);
     const label = profile.name ? `sound profile “${profile.name}”` : profile.count > 1 ? `the average of ${profile.count} references` : 'the reference';
-    log('Reference match', `Tonal balance moved ${Math.round(s.refStrength * 100)}% toward ${label}. Largest moves: ${biggest.map((p) => `${fmt(p.db)} dB at ${p.freq} Hz`).join(', ')}.${wantMax > REF_MAX_DB + 0.5 ? ` Matching fully would take up to ${wantMax.toFixed(1)} dB; the master stops at ${REF_MAX_DB} dB, as a bigger change sounds better made in the mix.` : ''}${guard ? ` Boosts above ${(bw.bandwidthHz / 1000).toFixed(1)} kHz were removed by the bandwidth guard.` : ''}`, { curve: curvePts });
+    log('Reference match', `Tone moved toward ${label} at ${Math.round(s.refStrength * 100)}% strength (${(REF_MAX_DB * s.refStrength).toFixed(1)} dB at most), with your own EQ on top. Largest moves: ${biggest.map((p) => `${fmt(p.db)} dB at ${p.freq} Hz`).join(', ')}.${differenceDb > REF_MAX_DB + 0.5 ? ` The two differ by up to ${differenceDb.toFixed(1)} dB; a bigger change sounds better made in the mix.` : ''}${guard ? ` Boosts above ${(bw.bandwidthHz / 1000).toFixed(1)} kHz were removed by the bandwidth guard.` : ''}`, { curve: curvePts });
   }
 
   let resonanceReport = null;
@@ -420,9 +422,11 @@ export function master(audio, settings, { references = [], profile = null, deliv
   const t0 = performance.now();
   progress('Analysing the input', 0.02);
   const inputAnalysis = analyze({ sr, channels: input }, { repairScan: true, progress: (st, f) => progress(`Analysing: ${st}`, 0.02 + f * 0.2) });
+  let learnedRefs = references.length;
   if (!profile && references.length) {
     progress('Learning the reference profile', 0.21);
     profile = learnProfile(references, { names: references.map((r) => r.name || '') });
+    learnedRefs = profile?.count || 0;
   }
   if (profile && s.profileLoudness) s.targetLufs = Math.round(Math.max(-24, Math.min(-6, profile.lufs)) * 10) / 10;
   // Auto profile: start from the analysis suggestions. Loudness target, ceiling
@@ -437,6 +441,8 @@ export function master(audio, settings, { references = [], profile = null, deliv
     }
     // Low-mid clean-up already on: a second, static cut there would double it.
     if (s.deBox > 0.01 && s.deMud > 0 && !locked.has('deMud')) { s.deMud = 0; autoApplied.deMud = 0; }
+    // A reference sets the overall tone, so the automatic tilt and air step aside.
+    if (profile && s.refStrength > 0.01) for (const k of ['tilt', 'air']) if (s[k] && !locked.has(k)) { s[k] = 0; autoApplied[k] = 0; }
   }
   if (soundMode) Object.assign(s, SOUND_OVERRIDES);
 
@@ -485,6 +491,9 @@ export function master(audio, settings, { references = [], profile = null, deliv
     warnings.push(`${outliers.length === 1 ? 'One hit' : `${outliers.length} hits`} (at ${outliers.map((o) => at(o.t)).join(', ')}) ${outliers.length === 1 ? 'stands' : 'stand'} up to ${Math.max(...outliers.map((o) => o.overDb)).toFixed(0)} dB above everything else in the song. The limiter catches ${outliers.length === 1 ? 'it' : 'them'}, but it may be worth a listen in the mix.`);
   }
   if (!soundMode && Math.abs(fin.achievedLufs - s.targetLufs) > 0.5) warnings.push(`Target ${s.targetLufs} LUFS could not be reached exactly (got ${fin.achievedLufs.toFixed(2)} LUFS).`);
+  const silentRefs = references.length - learnedRefs;
+  if (silentRefs > 0) warnings.push(`${silentRefs === 1 ? 'One reference file has' : `${silentRefs} reference files have`} no sound in ${silentRefs === 1 ? 'it' : 'them'}, so ${silentRefs === 1 ? 'it was' : 'they were'} left out.`);
+  if (s.refStrength > 0.01 && chain.refInfo?.differenceDb > REF_FAR_DB) warnings.push(`This reference is very different from your song (up to ${Math.round(chain.refInfo.differenceDb)} dB in places), so it only nudges the tone. A song in a similar style will work better.`);
 
   progress('Analysing the master', 0.88);
   const outputAnalysis = analyze({ sr, channels: fin.chs }, { progress: (st, f) => progress(`Analysing master: ${st}`, 0.88 + f * 0.08) });

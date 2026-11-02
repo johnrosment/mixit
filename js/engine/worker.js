@@ -69,6 +69,7 @@ self.onmessage = (ev) => {
       progress('Measuring references', 0.1);
       const refs = payload.references.map((r) => ({ ...toAudio(r), name: r.name }));
       const profile = learnProfile(refs, { name: payload.name || '', names: refs.map((r) => r.name || '') });
+      if (!profile) throw new Error('These files have no sound in them.');
       self.postMessage({ id, type: 'result', data: { profile } });
     } else if (type === 'master') {
       const audio = toAudio(payload.track);

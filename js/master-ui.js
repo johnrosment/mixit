@@ -123,7 +123,7 @@ const SCHEMA = [
     { key: 'balanceRepair', label: 'Fix a lopsided mix', type: 'toggle', help: 'If one side is louder overall, brings it back toward the middle.' },
   ] },
   { title: 'Reference and sound profile', items: [
-    { key: 'refStrength', label: 'How close to the reference', type: 'range', min: 0, max: 1, step: 0.05, format: pct, help: 'How far the tone moves toward your reference.' },
+    { key: 'refStrength', label: 'How close to the reference', type: 'range', min: 0, max: 1, step: 0.05, format: pct, help: 'How far the tone moves toward your reference, 3 dB at most. Your own EQ stays on top.' },
     { key: 'profileWidth', label: 'Match its width', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'Moves the stereo width toward the reference too.' },
     { key: 'profileLoudness', label: 'Match its loudness', type: 'toggle' },
   ] },
