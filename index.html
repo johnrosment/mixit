@@ -81,12 +81,18 @@
           <input type="file" id="xe-file" accept="audio/*,.wav,.aif,.aiff,.aifc,.flac,.mp3,.m4a,.ogg" multiple hidden>
         </div>
         <div class="easy-stems" id="xe-stems"></div>
-        <div class="drop slim" id="xe-rough-drop" tabindex="0" role="button" aria-label="Add your rough mix">
+        <div class="drop slim only-song" id="xe-rough-drop" tabindex="0" role="button" aria-label="Add your rough mix">
           <strong>Your rough mix <span class="opt">optional</span></strong>
           <span>Your own bounce of these stems. MIXIT copies its balance.</span>
           <input type="file" id="xe-rough-file" accept="audio/*,.wav,.aif,.aiff,.aifc,.flac,.mp3,.m4a,.ogg" hidden>
         </div>
-        <ul class="file-list" id="xe-rough"></ul>
+        <ul class="file-list only-song" id="xe-rough"></ul>
+        <div class="drop slim only-post" id="xe-video-drop" tabindex="0" role="button" aria-label="Add your video">
+          <strong>Your video <span class="opt">optional</span></strong>
+          <span>MP4 or MOV. The finished mix goes back into it; the picture isn't touched.</span>
+          <input type="file" id="xe-video-file" accept="video/mp4,video/quicktime,.mp4,.m4v,.mov" hidden>
+        </div>
+        <ul class="file-list only-post" id="xe-video"></ul>
         <div class="easy-controls" id="xe-controls"></div>
         <div class="render-bar">
           <button class="btn primary big" id="xe-render" disabled>Mix it</button>
@@ -114,6 +120,12 @@
               <input type="file" id="x-rough-file" accept="audio/*,.wav,.aif,.aiff,.aifc,.flac,.mp3,.m4a,.ogg" hidden>
             </div>
             <ul class="file-list" id="x-rough"></ul>
+            <h3 class="only-post">Your video <span class="opt">optional</span></h3>
+            <div class="drop small only-post" id="x-video-drop" tabindex="0" role="button" aria-label="Add your video">
+              <span>MP4 or MOV. The finished mix goes back into it; the picture isn't touched.</span>
+              <input type="file" id="x-video-file" accept="video/mp4,video/quicktime,.mp4,.m4v,.mov" hidden>
+            </div>
+            <ul class="file-list only-post" id="x-video"></ul>
           </div>
           <div class="card">
             <h2>Style</h2>
@@ -165,8 +177,8 @@
         <div class="drop big" id="me-drop" tabindex="0" role="button" aria-label="Add songs to master">
           <i class="shape square"></i>
           <strong>Drop a song here</strong>
-          <span>or click to choose. Drop a few to master them together.</span>
-          <input type="file" id="me-file" accept="audio/*,.wav,.aif,.aiff,.aifc,.flac,.mp3,.m4a,.ogg,.caf" multiple hidden>
+          <span>or click to choose. Several at once is fine. A video (MP4, MOV) works too: you get it back with the new sound.</span>
+          <input type="file" id="me-file" accept="audio/*,.wav,.aif,.aiff,.aifc,.flac,.mp3,.m4a,.ogg,.caf,.mp4,.m4v,.mov" multiple hidden>
         </div>
         <ul class="file-list" id="me-files"></ul>
         <div class="drop slim" id="me-ref-drop" tabindex="0" role="button" aria-label="Add a song to sound like">
@@ -191,8 +203,8 @@
             <h2>Track</h2>
             <div class="drop" id="m-drop" tabindex="0" role="button" aria-label="Add tracks to master">
               <strong>Drop tracks here</strong>
-              <span>or click to browse. WAV, AIFF, FLAC, MP3, M4A, OGG. Several files make a release batch.</span>
-              <input type="file" id="m-file" accept="audio/*,.wav,.aif,.aiff,.aifc,.flac,.mp3,.m4a,.ogg,.caf" multiple hidden>
+              <span>or click to browse. WAV, AIFF, FLAC, MP3, M4A, OGG, or a video (MP4, MOV). Several files make a release batch.</span>
+              <input type="file" id="m-file" accept="audio/*,.wav,.aif,.aiff,.aifc,.flac,.mp3,.m4a,.ogg,.caf,.mp4,.m4v,.mov" multiple hidden>
             </div>
             <ul class="file-list" id="m-files"></ul>
             <h3>Reference <span class="opt">optional</span></h3>
@@ -251,7 +263,7 @@
             <i class="shape triangle"></i>
             <strong>Drop a track to analyze</strong>
             <span>Loudness, peaks, tone, width, tempo, and a check for hum, clicks, clipping and noise.</span>
-            <input type="file" id="a-file" accept="audio/*,.wav,.aif,.aiff,.aifc,.flac,.mp3,.m4a,.ogg" hidden>
+            <input type="file" id="a-file" accept="audio/*,.wav,.aif,.aiff,.aifc,.flac,.mp3,.m4a,.ogg,.mp4,.m4v,.mov" hidden>
           </div>
           <div class="progress" id="a-progress" hidden><div class="loader" aria-hidden="true"><i></i><i></i><i></i></div><div class="bar"><i></i></div><span class="stage"></span></div>
         </div>

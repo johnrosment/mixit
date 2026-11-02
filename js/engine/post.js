@@ -4,7 +4,7 @@
 // the dialogue is).
 
 import { hopEnergies } from './loudness.js';
-import { lr4Split3, zeroPhaseLowpass } from './filters.js';
+import { lr4Split3, zeroPhaseLowpass, design, cascade } from './filters.js';
 
 // Common delivery targets. Specs differ by broadcaster and platform, so the
 // report always says to check the one you deliver to.
@@ -13,6 +13,8 @@ export const DELIVERY = {
   podcast: { label: 'Podcast', lufs: -16, ceiling: -1, tolerance: 1 },
   'tv-eu': { label: 'TV, Europe (EBU R128)', lufs: -23, ceiling: -1, tolerance: 0.5 },
   'tv-us': { label: 'TV, US (ATSC A/85)', lufs: -24, ceiling: -2, tolerance: 2 },
+  // Streaming drama and film measure the dialogue, not the whole programme.
+  series: { label: 'Streaming series or film', lufs: -27, ceiling: -2, tolerance: 2, gate: 'dialogue' },
 };
 
 // Frame rates for edit fades: film, PAL, NTSC and web video.
@@ -110,9 +112,89 @@ export function levelSpeech(chs, sr, { amount = 0.6, maxDb = 9 } = {}) {
 }
 
 /**
+ * Phase rotation: speech peaks lean one way and sit well above its loudness.
+ * All-passes change no level at any frequency but spread those peaks out, so
+ * the limiter has less to do. Tries a few and keeps the one that lowers the
+ * peaks most; if none lowers them by a quarter dB, the audio is left alone.
+ */
+const ROTATIONS = [[300, 300], [200, 200, 200, 200], [120, 240, 480]];
+export function rotatePhase(chs, sr) {
+  const peak = (arr) => { let p = 0; for (const ch of arr) for (let i = 0; i < ch.length; i++) { const v = ch[i] < 0 ? -ch[i] : ch[i]; if (v > p) p = v; } return p; };
+  const before = peak(chs);
+  if (!(before > 0)) return null;
+  let best = null;
+  for (const freqs of ROTATIONS) {
+    const cs = freqs.map((f) => design('allpass', f, sr));
+    const out = chs.map((ch) => cascade(cs, ch, new Float32Array(ch.length)));
+    const p = peak(out);
+    if (!best || p < best.p) best = { p, out };
+  }
+  const dropDb = 20 * Math.log10(before / best.p);
+  if (dropDb < 0.25) return null;
+  chs.forEach((ch, c) => ch.set(best.out[c]));
+  return { dropDb };
+}
+
+/**
+ * Several microphones at once: each mic's share of the total level sets its
+ * gain (the gain-sharing method of a live-speech automixer). The mic of whoever
+ * is talking stays at full level, the others step back, so bleed, room noise and
+ * comb filtering do not pile up; when two people talk at once each drops 3 dB and
+ * the total stays even. The whole file is known, so a mic opens just before its
+ * first word. `voices` are stereo pairs, changed in place.
+ */
+export function shareMics(voices, sr, { floorDb = -24, smoothMs = 30 } = {}) {
+  if (voices.length < 2) return null;
+  const hop = Math.max(1, Math.round(sr * 0.005));
+  const n = voices[0][0].length, H = Math.ceil(n / hop);
+  const a = Math.exp(-5 / smoothMs);
+  const power = voices.map((chs) => {
+    const e = new Float64Array(H);
+    for (const ch of chs) for (let i = 0; i < n; i++) e[(i / hop) | 0] += ch[i] * ch[i];
+    for (let j = 1; j < H; j++) e[j] = a * e[j - 1] + (1 - a) * e[j];
+    for (let j = H - 2; j >= 0; j--) e[j] = a * e[j + 1] + (1 - a) * e[j];
+    return e;
+  });
+  const floor = Math.pow(10, floorDb / 20);
+  voices.forEach((chs, v) => {
+    const g = new Float32Array(H);
+    for (let j = 0; j < H; j++) {
+      let total = 0;
+      for (const e of power) total += e[j];
+      g[j] = total > 1e-14 ? Math.max(floor, Math.sqrt(power[v][j] / total)) : 1 / Math.sqrt(voices.length);
+    }
+    for (const ch of chs) {
+      for (let i = 0; i < n; i++) {
+        const x = i / hop - 0.5, j = Math.max(0, Math.min(H - 1, Math.floor(x))), k = Math.min(H - 1, j + 1), t = Math.max(0, Math.min(1, x - j));
+        ch[i] *= g[j] * (1 - t) + g[k] * t;
+      }
+    }
+  });
+  return { mics: voices.length };
+}
+
+/**
+ * Loudness of the programme while someone is speaking (dialogue-gated
+ * loudness): BS.1770 on the 400 ms blocks of `out` during which the dialogue is
+ * active. Null when there is no speech to measure.
+ */
+export function dialogueLoudness(out, dialogue, sr) {
+  const { energy, hop } = hopEnergies(out, sr, 0.1);
+  const { active } = phraseLoudness(dialogue, sr, { hopSec: 0.1, windowHops: 3, gateDb: 20 });
+  let sum = 0, count = 0;
+  for (let j = 3; j < energy.length; j++) {
+    if (active[j] + active[j - 1] + active[j - 2] + active[j - 3] < 2) continue;
+    sum += (energy[j] + energy[j - 1] + energy[j - 2] + energy[j - 3]) / (4 * hop);
+    count++;
+  }
+  return count >= 5 ? db(sum / count) : null;
+}
+
+/**
  * Mouth clicks and ticks in dialogue: bursts under 3 ms in the band above
- * 2.5 kHz that stand well above everything else within 15 ms either side
- * (so the regular pulses of a voice are not taken for clicks). A burst that
+ * 2.5 kHz that stand well above everything else within 30 ms either side
+ * (so the regular pulses of a voice, down to the 16 ms spacing of a low creaky
+ * voice, are not taken for clicks). A burst that
  * starts a sound (much more energy just after than just before, as in "t" or
  * "k") is left alone. Only the upper band is dipped, down to the level around
  * the click, so the voice underneath is untouched.
@@ -131,7 +213,7 @@ export function mouthDeclick(chs, sr, { sensitivity = 0.5 } = {}) {
     env[j] = p;
   }
   const ratio = Math.pow(10, (14 - 8 * Math.max(0, Math.min(1, sensitivity))) / 20); // 14 dB above at 0, 6 dB at 1
-  const W = Math.round((0.015 * sr) / hop), X = Math.round((0.0015 * sr) / hop), maxLen = Math.round((0.003 * sr) / hop);
+  const W = Math.round((0.03 * sr) / hop), X = Math.round((0.0015 * sr) / hop), maxLen = Math.round((0.003 * sr) / hop);
   const pre = new Float64Array(H + 1);
   for (let j = 0; j < H; j++) pre[j + 1] = pre[j] + env[j];
   const ms = (t) => Math.round(t * 0.001 * sr);
@@ -140,8 +222,8 @@ export function mouthDeclick(chs, sr, { sensitivity = 0.5 } = {}) {
   for (let j = 0; j < H; j++) {
     const lo = Math.max(0, j - W), hi = Math.min(H, j + W + 1);
     if (env[j] < 3e-4 || env[j] < (3 * (pre[hi] - pre[lo])) / (hi - lo)) continue; // quick gate: under -70 dBFS or under 3x the local average
-    // Reference: the loudest moment of the band within 15 ms, the click itself
-    // left out, so a voice's own pulses (every 4-12 ms) never stand out.
+    // Reference: the loudest moment of the band within 30 ms, the click itself
+    // left out, so a voice's own pulses (every 4-17 ms) never stand out.
     let ref = 0;
     for (let k = lo; k < hi; k++) if ((k < j - X || k > j + maxLen + X) && env[k] > ref) ref = env[k];
     if (env[j] < ratio * ref) continue;
@@ -267,16 +349,18 @@ export function deliveryCheck(out, dialogue, sr, { standard, achievedLufs, trueP
     if (quiet && start < 0) start = j;
     if (!quiet && start >= 0) { if ((j - start) * secs >= 2) dead.push({ start: start * secs, end: j * secs }); start = -1; }
   }
-  let voice = null;
+  let voice = null, dialogueLufs = null;
   if (dialogue) {
     const p = phraseLoudness(dialogue, sr, { gateDb: 20 });
     const act = p.loud.filter((_, j) => p.active[j]);
     if (act.length > 20) voice = { spreadDb: pctl(act, 0.9) - pctl(act, 0.1) };
+    dialogueLufs = dialogueLoudness(out, dialogue, sr);
   }
+  const measured = spec?.gate === 'dialogue' && dialogueLufs != null ? dialogueLufs : achievedLufs;
   return {
     standard, label: spec?.label || 'Custom', targetLufs: spec?.lufs ?? null, ceiling: spec?.ceiling ?? null, tolerance: spec?.tolerance ?? null,
-    achievedLufs, truePeakDbtp,
-    loudnessOk: spec ? Math.abs(achievedLufs - spec.lufs) <= spec.tolerance : null,
+    achievedLufs, truePeakDbtp, dialogueLufs, gate: spec?.gate || null,
+    loudnessOk: spec ? Math.abs(measured - spec.lufs) <= spec.tolerance : null,
     peakOk: spec ? truePeakDbtp <= spec.ceiling + 0.05 : null,
     deadAir: dead,
     voice,

@@ -31,16 +31,23 @@ function toStereo(audio) {
   return { sr: audio.sr, channels: out };
 }
 
+// A float file can hold NaN or infinite samples. One is enough to turn every
+// filter after it, and so the whole stem, into silence or noise; they become 0.
+function repairSamples(audio) {
+  for (const ch of audio.channels) for (let i = 0; i < ch.length; i++) if (!Number.isFinite(ch[i])) ch[i] = 0;
+  return audio;
+}
+
 function toAudio(payload) {
   if (payload.wav) {
     const p = parseWav(payload.wav);
-    return toStereo({ sr: p.sr, channels: p.channels });
+    return toStereo(repairSamples({ sr: p.sr, channels: p.channels }));
   }
   if (payload.aiff) {
     const p = parseAiff(payload.aiff);
-    return toStereo({ sr: p.sr, channels: p.channels });
+    return toStereo(repairSamples({ sr: p.sr, channels: p.channels }));
   }
-  return toStereo(payload.audio);
+  return toStereo(repairSamples(payload.audio));
 }
 
 function buffersOf(chs) {

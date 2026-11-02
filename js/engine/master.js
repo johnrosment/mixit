@@ -14,6 +14,7 @@ import {
 import { learnProfile, profileSpectrum, profileWidthFactors } from './profile.js';
 import { upsample2, downsample2, HALF_BAND } from './resample.js';
 import { upmix, loudnessWeights, channelLevels } from './spatial.js';
+import { fadeEdits } from './post.js';
 
 export const MASTER_DEFAULTS = {
   targetLufs: -14, ceiling: -1, lookahead: 5, release: 80,
@@ -44,8 +45,14 @@ export const PLATFORM_TARGETS = [
 export const VARIATION_OVERRIDES = {
   transparent: { multiband: 0.12, glue: 0.1, saturation: 0, resonance: 0.15 },
   warm: { tilt: -1, saturation: 3, satMode: 'tube', glue: 0.35, high: -0.5 },
-  loud: { targetLufs: -9, multiband: 0.55, glue: 0.45, saturation: 2, satMode: 'clip' },
+  loud: { targetLufs: -9, ceiling: -2, multiband: 0.55, glue: 0.45, saturation: 2, satMode: 'clip' },
 };
+
+// Sound effects and sound design keep their shape: no bus compression, de-essing
+// or stereo "repair" (a sound panned to one side is meant to be there), and a
+// level set by the peak, as one short hit has no meaningful average loudness.
+const SOUND_OVERRIDES = { multiband: 0, glue: 0, deess: 0, resonance: 0, sectionDyn: 0, hfReserve: 0, saturation: 0, balanceRepair: false, bandBalance: false, hpf: 20, attack: 0, sustain: 0, deBox: 0, bassDebloom: 0 };
+const SHORT_SOUND_SEC = 6;
 
 // Vinyl / cassette pre-master: summed low end, more sibilance control, a
 // gentler loudness target and protected headroom.
@@ -111,6 +118,19 @@ export function finalize(chs, sr, { targetLufs, ceiling, lookahead = 5, release 
     safetyTrimDb: safety,
     iterations,
     limiter: lim,
+  };
+}
+
+/** Sets the level from the true peak alone, with no limiting. For sounds whose shape matters more than their loudness. */
+export function finalizeByPeak(chs, sr, { ceiling }) {
+  const tp = truePeak(chs, sr).dbtp;
+  const gainDb = tp > -119 ? ceiling - 0.02 - tp : 0;
+  const out = chs.map((c) => new Float32Array(c));
+  gain(out, gainDb);
+  const n = chs[0].length;
+  return {
+    chs: out, gainDb, achievedLufs: integratedLufs(out, sr), truePeakDbtp: tp + gainDb, safetyTrimDb: 0, iterations: 1,
+    limiter: { maxGr: 0, avgGr: 0, activePct: 0, curve: new Float32Array(Math.ceil(n / Math.max(1, Math.round(sr * 0.05)))), curveStepSec: 0.05 },
   };
 }
 
@@ -391,6 +411,8 @@ function fmt(v) {
 export function master(audio, settings, { references = [], profile = null, deliverables = {}, progress = () => {} } = {}) {
   const s = { ...MASTER_DEFAULTS, ...settings };
   const sr = audio.sr;
+  // A sound effect, chosen or simply very short (a song clip this short would be limited to nothing).
+  const soundMode = s.soundMode || audio.channels[0].length / sr < SHORT_SOUND_SEC;
   const input = audio.channels.length > 1 ? audio.channels.slice(0, 2) : [audio.channels[0], audio.channels[0]];
   const t0 = performance.now();
   progress('Analysing the input', 0.02);
@@ -411,6 +433,7 @@ export function master(audio, settings, { references = [], profile = null, deliv
       autoApplied[k] = v;
     }
   }
+  if (soundMode) Object.assign(s, SOUND_OVERRIDES);
 
   // Oversampled processing: the whole chain and the limiter run at twice the
   // rate, then a linear-phase half-band filter brings it back and a final
@@ -425,6 +448,7 @@ export function master(audio, settings, { references = [], profile = null, deliv
     chainAnalysis = sd0 ? { ...inputAnalysis, repair: { ...inputAnalysis.repair, stereoDelay: { ...sd0, lagSamples: sd0.lagSamples * 2 } } } : inputAnalysis;
   }
   const finalizeOut = (chs, vs, cache = {}) => {
+    if (soundMode) return finalizeByPeak(os === 2 ? chs.map(downsample2) : chs, sr, vs);
     const f = finalize(chs, wsr, vs, cache);
     if (os === 1) return f;
     const g = finalize(f.chs.map(downsample2), sr, vs);
@@ -432,6 +456,10 @@ export function master(audio, settings, { references = [], profile = null, deliv
   };
 
   const chain = processChain(work, wsr, s, { profile, progress, inputAnalysis: chainAnalysis });
+  if (soundMode) {
+    const f = fadeEdits(chain.chs, wsr, { frames: 0.5, fps: 25, kind: 'effects' });
+    chain.stages.push({ stage: 'Sound effect', detail: `Kept its shape: no bus compression, and the level set by its peak rather than its loudness. ${f.fades ? `A short fade on ${f.fades / 2} sound${f.fades === 2 ? '' : 's'} so no edge clicks; hits keep their attack.` : ''}`.trim() });
+  }
   if (os === 2) chain.stages.unshift({ stage: 'Oversampled processing', detail: `Every stage below ran at ${(wsr / 1000).toFixed(1)} kHz (2x the source), so saturation, fast dynamics and the limiter create less aliasing. Converted with a ${HALF_BAND.taps}-tap linear-phase half-band filter (flat to ${(HALF_BAND.passband * sr / 1000).toFixed(1)} kHz, about 100 dB rejection above).` });
   progress('Loudness and true-peak limiting', 0.82);
   const finCache = {};
@@ -441,8 +469,9 @@ export function master(audio, settings, { references = [], profile = null, deliv
     detail: `Gain ${fmt(fin.gainDb)} dB into a true-peak limiter (ceiling ${s.ceiling} dBTP, ${s.lookahead} ms look-ahead, ${s.release} ms release that adapts: quicker after short peaks, slower when limiting is held). Reached ${fin.achievedLufs.toFixed(2)} LUFS at ${fin.truePeakDbtp.toFixed(2)} dBTP in ${fin.iterations} pass(es). Limiter: avg ${fin.limiter.avgGr.toFixed(2)} dB, max ${fin.limiter.maxGr.toFixed(1)} dB, active ${fin.limiter.activePct.toFixed(1)}% of the time.${os === 2 ? ` After converting back to ${(sr / 1000).toFixed(1)} kHz, a final pass caught up to ${fin.convertGrDb.toFixed(2)} dB of conversion overshoot.` : ''}`,
   });
   const warnings = [];
+  if (!soundMode && s.targetLufs > -14 && s.ceiling > -2) warnings.push(`At ${s.targetLufs} LUFS, Spotify advises a peak limit of -2 dBTP or lower, as louder masters distort more when encoded for streaming. This one is set to ${s.ceiling}.`);
   if (fin.limiter.maxGr > 8 || fin.limiter.avgGr > 2) warnings.push(`The limiter is working hard to reach ${s.targetLufs} LUFS (up to ${fin.limiter.maxGr.toFixed(1)} dB, ${fin.limiter.avgGr.toFixed(1)} dB on average; 1-3 dB is the comfortable range). Hits may sound flattened. A slightly lower loudness target will keep more punch and feeling.`);
-  if (Math.abs(fin.achievedLufs - s.targetLufs) > 0.5) warnings.push(`Target ${s.targetLufs} LUFS could not be reached exactly (got ${fin.achievedLufs.toFixed(2)} LUFS).`);
+  if (!soundMode && Math.abs(fin.achievedLufs - s.targetLufs) > 0.5) warnings.push(`Target ${s.targetLufs} LUFS could not be reached exactly (got ${fin.achievedLufs.toFixed(2)} LUFS).`);
 
   progress('Analysing the master', 0.88);
   const outputAnalysis = analyze({ sr, channels: fin.chs }, { progress: (st, f) => progress(`Analysing master: ${st}`, 0.88 + f * 0.08) });
@@ -463,6 +492,12 @@ export function master(audio, settings, { references = [], profile = null, deliv
       const f = finalizeOut(c.chs, vs);
       extras.push({ kind: 'variation', key, label: key[0].toUpperCase() + key.slice(1), chs: f.chs, lufs: f.achievedLufs, dbtp: f.truePeakDbtp, maxGr: f.limiter.maxGr });
     }
+  }
+  if (deliverables.raw) {
+    // Everything but the limiter: all the peaks kept, for a hi-fi release or a later mastering stage.
+    progress('Delivery: raw master', 0.972);
+    const f = finalizeByPeak(os === 2 ? chain.chs.map(downsample2) : chain.chs, sr, { ceiling: -1 });
+    extras.push({ kind: 'raw', key: 'raw', label: 'Raw master (no limiter)', chs: f.chs, lufs: f.achievedLufs, dbtp: f.truePeakDbtp, maxGr: 0 });
   }
   if (deliverables.mono) {
     progress('Delivery: mono master', 0.975);
@@ -504,6 +539,7 @@ export function master(audio, settings, { references = [], profile = null, deliv
     extras,
     report: {
       settings: s,
+      soundMode,
       autoApplied,
       input: inputAnalysis,
       output: outputAnalysis,

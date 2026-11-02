@@ -14,8 +14,8 @@ import { tuneVocal, SCALES } from './pitch.js';
 import { detectSections, sectionMoves, sectionCurve } from './sections.js';
 import { roughFeatures, stemFeatures, addFeatures, fitBalance } from './roughmix.js';
 import { lowCutFreq, resonantCuts } from './stemtools.js';
-import { levelSpeech, duckUnderSpeech, deliveryCheck, fadeEdits, mouthDeclick, FRAME_RATES } from './post.js';
-import { denoise, detectClicks, repairClicks } from './repair.js';
+import { levelSpeech, duckUnderSpeech, deliveryCheck, fadeEdits, mouthDeclick, rotatePhase, shareMics, dialogueLoudness, FRAME_RATES, DELIVERY } from './post.js';
+import { denoise, detectClicks, repairClicks, detectHumInPauses, removeHum } from './repair.js';
 
 export const BUS_KEYS = ['vocals', 'drums', 'bass', 'music', 'fx', 'ambience'];
 
@@ -116,6 +116,9 @@ export class MixSession {
     this.stemReports = [];
     this.anySolo = settings.stems.some((st) => st.solo && !st.mute);
     this.edits = { clicks: 0, fades: 0, hard: 0, blips: 0 };
+    // Two or more voices are held back until all are in, so their mics can share the level.
+    const voiceCount = settings.stems.filter((st) => st.category === 'vocals' && !st.mute && (!this.anySolo || st.solo)).length;
+    this.heldVoices = settings.mode === 'post' && settings.shareMics !== false && voiceCount > 1 ? [] : null;
     // Pitch-correction key: fixed, chromatic, or detected from the first tuned vocal and reused.
     const k = settings.tuneKey || 'auto';
     this.tuneKey = k === 'auto' ? null : k === 'chromatic' ? { root: 0, scale: 'chromatic' } : { root: Number(k.split(':')[0]), scale: k.split(':')[1] };
@@ -155,6 +158,15 @@ export class MixSession {
       const count = det.count + mouth;
       if (count) row.steps.push(`${count} click${count === 1 ? '' : 's'} removed${mouth ? ` (${mouth} mouth click${mouth === 1 ? '' : 's'})` : ''}`);
       this.edits.clicks += count;
+    }
+    // Mains hum in a voice, found in its pauses. Before the fades: these narrow
+    // cuts ring for a moment after a sound stops, and the fades clean that up.
+    if (kind === 'dialogue' && this.s.dialogueHum !== false) {
+      const h = detectHumInPauses(chs, sr);
+      if (h.detected) {
+        const r = removeHum(chs, sr, h);
+        if (r.filters.length) row.steps.push(`${h.mains} Hz hum removed (${r.filters.length} narrow cut${r.filters.length === 1 ? '' : 's'})`);
+      }
     }
     const frames = Number(this.s.editFades ?? 1);
     if (kind && frames > 0) {
@@ -247,7 +259,8 @@ export class MixSession {
       if (bus === 'vocals') bus = st.role === 'lead' ? 'vocalLead' : 'vocalSupport';
       if (bus === 'ambience' && !this.buses.ambience) this.buses.ambience = stereoBuf(n);
       if (!this.buses[bus]) bus = 'music';
-      addInto(this.buses[bus], chs, 1);
+      if (this.heldVoices && st.category === 'vocals') this.heldVoices.push(chs);
+      else addInto(this.buses[bus], chs, 1);
       this.used[bus] = true;
       row.bus = bus;
     }
@@ -262,6 +275,19 @@ export class MixSession {
     const busReports = {};
     const balance = s.autoBalance !== false;
     const post = s.mode === 'post';
+
+    // --- Several microphones: the one being spoken into stays up, the rest step back ---
+    if (this.heldVoices?.length) {
+      const shared = shareMics(this.heldVoices, sr);
+      for (const v of this.heldVoices) addInto(B.vocalLead, v, 1);
+      this.heldVoices = null;
+      if (shared) log.push(`${shared.mics} voices share the level: the mic being spoken into stays up and the others step back, so bleed and room noise do not pile up.`);
+    }
+    // Lower dialogue peaks at the same loudness, so the limiter has less to do.
+    if (post && this.used.vocalLead && s.phaseRotate !== false) {
+      const r = rotatePhase(B.vocalLead, sr);
+      if (r) log.push(`Dialogue peaks lowered ${r.dropDb.toFixed(1)} dB by rotating their phase; loudness and tone are unchanged.`);
+    }
 
     // --- Vocal lead / support balance ---
     progress('Balancing vocals', 0.05);
@@ -617,7 +643,13 @@ export class MixSession {
     progress('Output level', 0.78);
     let outGain = 0, out = mix, limiter = null;
     if (s.outputMode === 'loudness') {
-      const f = finalize(mix, sr, { targetLufs: s.targetLufs ?? -14, ceiling: s.ceiling ?? -1 });
+      // Standards that measure the dialogue: the whole programme moves so that the speech lands on target.
+      let targetLufs = s.targetLufs ?? -14;
+      if (post && DELIVERY[s.delivery]?.gate === 'dialogue' && used.vocals) {
+        const gated = dialogueLoudness(mix, buses.vocals, sr), whole = integratedLufs(mix, sr);
+        if (gated != null && whole > -70) targetLufs += whole - gated;
+      }
+      const f = finalize(mix, sr, { targetLufs, ceiling: s.ceiling ?? -1 });
       out = f.chs; outGain = f.gainDb; limiter = { maxGr: f.limiter.maxGr, avgGr: f.limiter.avgGr, curve: f.limiter.curve, stepSec: f.limiter.curveStepSec };
       log.push(`Output: ${f.achievedLufs.toFixed(2)} LUFS at ${f.truePeakDbtp.toFixed(2)} dBTP through the true-peak limiter (max ${f.limiter.maxGr.toFixed(1)} dB).`);
     } else {
@@ -696,12 +728,17 @@ export class MixSession {
     // when needed so none of them peaks above -1 dBFS (a loud mix is limited, its stems are not).
     let busStems = null, busStemTrimDb = 0;
     if (s.renderBusStems) {
+      // A video mix also gets music and effects without the dialogue, the usual file for dubbing and re-edits.
+      const noDialogue = BUS_KEYS.filter((k) => used[k] && k !== 'vocals');
+      let me = null;
+      if (post && used.vocals && noDialogue.length) { me = stereoBuf(n); for (const k of noDialogue) addInto(me, buses[k], 1); }
+      const parts = { ...Object.fromEntries(BUS_KEYS.filter((k) => used[k]).map((k) => [k, buses[k]])), ...(me ? { me } : {}) };
       let peak = 0;
-      for (const k of BUS_KEYS) if (used[k]) for (const ch of buses[k]) for (let i = 0; i < ch.length; i++) { const a = Math.abs(ch[i]); if (a > peak) peak = a; }
+      for (const chs of Object.values(parts)) for (const ch of chs) for (let i = 0; i < ch.length; i++) { const a = Math.abs(ch[i]); if (a > peak) peak = a; }
       const limit = Math.pow(10, -1 / 20);
       const g = peak * og > limit ? limit / peak : og;
       busStemTrimDb = 20 * Math.log10(g / og);
-      busStems = Object.fromEntries(BUS_KEYS.filter((k) => used[k]).map((k) => [k, buses[k].map((ch) => { const c = new Float32Array(ch); for (let i = 0; i < c.length; i++) c[i] *= g; return c; })]));
+      busStems = Object.fromEntries(Object.entries(parts).map(([k, chs]) => [k, chs.map((ch) => { const c = new Float32Array(ch); for (let i = 0; i < c.length; i++) c[i] *= g; return c; })]));
       if (busStemTrimDb < -0.05) log.push(`Bus stems were saved ${Math.abs(busStemTrimDb).toFixed(1)} dB under the mix's level so none of them clips; their balance is unchanged.`);
     }
 

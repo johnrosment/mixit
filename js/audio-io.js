@@ -3,6 +3,8 @@
 import { encodeWav } from './engine/wav.js';
 import { encodeFlac } from './engine/flac.js';
 import { isAiff, describeComm, finishHeader } from './engine/aiff.js';
+import { truePeak } from './engine/loudness.js';
+import { isVideoFile, extractSound } from './video.js';
 
 const decodedCache = new WeakMap();
 export const COMPRESSED_DECODE_SR = 48000;
@@ -76,14 +78,21 @@ export async function probeFile(file) {
   try {
     return await probeCompressed(file);
   } catch (err) {
-    return { valid: false, kind: 'unknown', reason: 'This browser could not decode the file' };
+    return { valid: false, kind: 'unknown', reason: err?.friendly ? err.message : 'This browser could not decode the file' };
   }
 }
 
 async function decodeCompressed(file, sr) {
   const cached = decodedCache.get(file);
   if (cached && cached.sr === sr) return cached;
-  const buf = await file.arrayBuffer();
+  // From a video, only the sound is read, so its size hardly matters.
+  let buf = null;
+  if (isVideoFile(file)) {
+    try {
+      buf = await extractSound(file);
+    } catch (err) { err.friendly = true; throw err; }
+    if (!buf) { const none = new Error('This video has no sound'); none.friendly = true; throw none; }
+  } else buf = await file.arrayBuffer();
   const ctx = new OfflineAudioContext(2, 1, sr);
   const ab = await ctx.decodeAudioData(buf);
   const audio = { sr: ab.sampleRate, channels: Array.from({ length: ab.numberOfChannels }, (_, c) => ab.getChannelData(c).slice()) };
@@ -139,9 +148,16 @@ export function framesAt(info, sr) {
  * WAV (16/24-bit PCM or 32-bit float, optional bext) or FLAC (16/24-bit).
  * Mono audio is written as dual-mono stereo unless `keepMono` is set.
  */
-export async function encodeForDownload(audio, { bits = 24, dither = 'tpdf', outputRate = 0, meta = null, bext = null, format = 'wav', keepMono = false, channelMask = 0 } = {}) {
+export async function encodeForDownload(audio, { bits = 24, dither = 'tpdf', outputRate = 0, meta = null, bext = null, format = 'wav', keepMono = false, channelMask = 0, ceilingDb = null } = {}) {
   let a = audio;
-  if (outputRate && outputRate !== audio.sr) a = await resample(audio, outputRate);
+  if (outputRate && outputRate !== audio.sr) {
+    a = await resample(audio, outputRate);
+    // Converting the rate moves the peaks, and a true peak only counts at the rate you ship.
+    if (ceilingDb != null) {
+      const over = truePeak(a.channels, a.sr).dbtp - ceilingDb;
+      if (over > 0) { const g = Math.pow(10, -(over + 0.02) / 20); a = { sr: a.sr, channels: a.channels.map((c) => Float32Array.from(c, (v) => v * g)) }; }
+    }
+  }
   const chs = a.channels.length === 1 && !keepMono ? [a.channels[0], a.channels[0]] : a.channels;
   // Speaker beds are always WAV (WAVE_FORMAT_EXTENSIBLE with the speaker mask).
   if (format === 'flac' && chs.length <= 2) return { buffer: encodeFlac(chs, a.sr, { bits: bits === 16 ? 16 : 24, dither, meta }), sr: a.sr };

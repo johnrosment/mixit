@@ -189,9 +189,9 @@ export function wireDrop(zone, input, onFiles) {
   zone.addEventListener('drop', (e) => {
     e.preventDefault();
     zone.classList.remove('over');
-    const files = [...(e.dataTransfer?.files || [])].filter((f) => /^audio\//.test(f.type) || /\.(wav|wave|aif|aiff|aifc|flac|mp3|m4a|aac|ogg|oga|opus|caf)$/i.test(f.name));
+    const files = [...(e.dataTransfer?.files || [])].filter((f) => /^audio\/|^video\/(mp4|quicktime|x-m4v)$/.test(f.type) || /\.(wav|wave|aif|aiff|aifc|flac|mp3|m4a|aac|ogg|oga|opus|caf|mp4|m4v|mov)$/i.test(f.name));
     if (files.length) onFiles(files);
-    else toast('Those files do not look like audio.', { error: true });
+    else toast('Those files do not look like audio or video.', { error: true });
   });
 }
 

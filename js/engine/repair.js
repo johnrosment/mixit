@@ -445,6 +445,39 @@ export function detectHum(chs, sr) {
   return { detected: true, mains: best.mains, f0: best.f0, harmonics: best.h.map((x) => ({ n: x.n, freq: x.n * best.f0, prominenceDb: x.prominenceDb })) };
 }
 
+/**
+ * Hum under speech. A voice hides the harmonics in a long average, so this looks
+ * only at the pauses (quarter-second frames well under the speech). A mains
+ * series needs its fundamental and one more harmonic standing out there. The
+ * exact frequency comes from the whole file, where the fundamental stays visible.
+ */
+export function detectHumInPauses(chs, sr) {
+  const none = { detected: false, f0: 0, harmonics: [] };
+  if (chs[0].length < sr * 4) return none;
+  const low = decimateLow(chs, sr);
+  const N = 1024;
+  const totals = [];
+  stft(low.chs, low.sr, { N, overlap: 2, onFrame: (re, im, power) => { let t = 0; for (let k = 1; k < power.length; k++) t += power[k]; totals.push(t); } });
+  const live = totals.filter((t) => t > 1e-24).sort((a, b) => a - b);
+  if (live.length < 16) return none;
+  const limit = Math.min(live[Math.floor(live.length * 0.4)], 0.00316 * live[Math.floor(live.length * 0.95)]); // and 25 dB under the speech
+  const acc = new Float64Array(N / 2 + 1);
+  let count = 0;
+  stft(low.chs, low.sr, { N, overlap: 2, onFrame: (re, im, power, f) => { if (totals[f] > 1e-24 && totals[f] <= limit) { for (let k = 0; k < acc.length; k++) acc[k] += power[k]; count++; } } });
+  if (count < 8) return none; // about a second of pauses
+  let best = null;
+  for (const mains of [50, 60]) {
+    const s = scoreHum(acc, low.sr / N, mains);
+    if (!s.strong.some((x) => x.n === 1) || s.strong.length < 2) continue;
+    if (!best || s.total > best.s.total) best = { mains, s };
+  }
+  if (!best) return none;
+  const whole = lowSpectrum(low.chs, low.sr, 8192);
+  const f1 = scoreHum(whole, low.sr / 8192, best.mains).harmonics.find((x) => x.n === 1);
+  const f0 = f1 && Math.abs(f1.freq - best.mains) < 1 ? f1.freq : best.mains;
+  return { detected: true, mains: best.mains, f0, harmonics: best.s.strong.map((x) => ({ n: x.n, freq: x.n * f0, prominenceDb: x.prominenceDb })) };
+}
+
 /** Narrow peaking cuts at each qualified harmonic, sized by its measured prominence. */
 export function removeHum(chs, sr, detection, { amount = 1 } = {}) {
   if (!detection.detected) return { filters: [] };

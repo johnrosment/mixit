@@ -21,6 +21,10 @@ export function design(type, freq, sr, q = Math.SQRT1_2, gainDb = 0) {
       b0 = alpha; b1 = 0; b2 = -alpha;
       a0 = 1 + alpha; a1 = -2 * cs; a2 = 1 - alpha;
       break;
+    case 'allpass':
+      b0 = 1 - alpha; b1 = -2 * cs; b2 = 1 + alpha;
+      a0 = 1 + alpha; a1 = -2 * cs; a2 = 1 - alpha;
+      break;
     case 'peaking':
       b0 = 1 + alpha * A; b1 = -2 * cs; b2 = 1 - alpha * A;
       a0 = 1 + alpha / A; a1 = -2 * cs; a2 = 1 - alpha / A;

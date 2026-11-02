@@ -219,9 +219,11 @@ export function truePeakEnvelope(chs, sr, taps = 8) {
  * True-peak meter. An interpolated value can exceed the largest sample in its
  * window by at most the filter's absolute tap sum, so only windows containing
  * a sample within that factor of the channel's sample peak are interpolated.
+ * Twice the BS.1770 minimum (8x at 44.1-48 kHz): a lone transient between the
+ * points of a 4x grid reads up to about 0.1 dB low, on the permissive side.
  */
 export function truePeak(chs, sr) {
-  const factor = oversampleFactor(sr);
+  const factor = oversampleFactor(sr) * 2;
   const taps = 24;
   const perChannel = [];
   if (factor === 1) {

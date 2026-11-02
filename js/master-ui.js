@@ -9,6 +9,7 @@ import { trimAndFade, frequencyLayers, makeLoop, assembleAlbum } from './engine/
 import { sha256Hex, qcHtml, manifest } from './qc.js';
 import { renderBinaural } from './binaural.js';
 import { encodeMp3, mp3Bitrate, mp3SizeMb } from './mp3.js';
+import { isVideoFile, replaceVideoSound, videoOutName } from './video.js';
 import { LAYOUTS } from './engine/spatial.js';
 import { DELIVERY } from './engine/post.js';
 import {
@@ -26,25 +27,33 @@ export const MASTER_DEFAULTS = {
   widthLow: 1, widthMid: 1, widthHigh: 1, monoBass: 0, balanceRepair: true,
   delayRepair: false, declip: false, clickRepair: 0, hum: 0, denoise: 0, bandBalance: false, bandwidthGuard: true,
   format: 'wav', bitDepth: 24, dither: 'tpdf', outputRate: 0, trim: false, fadeIn: 0, fadeOut: 0,
-  platformPack: false, variations: false, mono: false, vinyl: false, layers: false, loop: false, loopSeam: 1, hiRes: false,
+  platformPack: false, variations: false, raw: false, mono: false, vinyl: false, layers: false, loop: false, loopSeam: 1, hiRes: false,
   spatial: 'off', spatialCentre: 0.5, spatialSurround: 0.6, spatialLfe: -12,
   cohesion: false, albumGap: 2,
   title: '', artist: '', album: '', year: '', isrc: '',
 };
 
 // Keys that shape files and deliverables rather than the processing chain.
-const OUTPUT_ONLY = ['delivery', 'format', 'bitDepth', 'dither', 'outputRate', 'trim', 'fadeIn', 'fadeOut', 'platformPack', 'variations', 'mono', 'vinyl',
+const OUTPUT_ONLY = ['delivery', 'format', 'bitDepth', 'dither', 'outputRate', 'trim', 'fadeIn', 'fadeOut', 'platformPack', 'variations', 'raw', 'mono', 'vinyl',
   'layers', 'loop', 'loopSeam', 'hiRes', 'spatial', 'spatialCentre', 'spatialSurround', 'spatialLfe', 'cohesion', 'albumGap', 'title', 'artist', 'album', 'year', 'isrc'];
 const OUTPUT_KEYS = [...OUTPUT_ONLY, 'targetLufs', 'ceiling'];
+
+// What a finished file can be made for. A standard that measures dialogue needs
+// the dialogue stem, so it lives on the Mix page only.
+const MASTER_DELIVERY = {
+  streaming: { label: 'Music streaming (Spotify, Apple Music, TIDAL)', lufs: -14, ceiling: -1, tolerance: 1 },
+  ...Object.fromEntries(Object.entries(DELIVERY).filter(([, d]) => !d.gate)),
+  sound: { label: 'Sound effects and sound design', lufs: null, ceiling: -1 },
+};
 
 export const PROFILES = {
   auto: { label: 'Auto', hint: 'Listens to the track first, then sets brightness, muddiness cleanup, "s" softening, compression and centred bass to suit it. Anything you change by hand afterwards is kept. Repair tools stay off until you turn them on.', set: {} },
   transparent: { label: 'Transparent', hint: 'Just level and peak control, with almost no colour. For mixes that already sound finished.', set: { multiband: 0.12, glue: 0.1, resonance: 0.15, deess: 0.1, saturation: 0 } },
   balanced: { label: 'Balanced', hint: 'A bit of everything: moderate compression and gentle smoothing of harsh spots.', set: {} },
-  punch: { label: 'Punch', hint: 'Snappier hits, a little tape warmth and a louder result.', set: { multiband: 0.5, glue: 0.45, saturation: 1.5, satMode: 'tape', targetLufs: -11, widthHigh: 1.08, attack: 0.25 } },
+  punch: { label: 'Punch', hint: 'Snappier hits, a little tape warmth and a louder result.', set: { multiband: 0.5, glue: 0.45, saturation: 1.5, satMode: 'tape', targetLufs: -11, ceiling: -2, widthHigh: 1.08, attack: 0.25 } },
   warm: { label: 'Warm', hint: 'Darker, rounder and softer. Good for bright or harsh mixes.', set: { tilt: -1, high: -0.5, saturation: 3, satMode: 'tube', glue: 0.35, resonance: 0.35 } },
   bright: { label: 'Bright', hint: 'More presence and sparkle, with extra smoothing so it never gets harsh.', set: { tilt: 1, air: 1.5, deess: 0.45, resonance: 0.5 } },
-  loud: { label: 'Loud', hint: 'Very loud and dense for competitive releases: heavier compression, sudden jumps tamed, sharp highs held back and a soft clipper before the limiter.', set: { targetLufs: -9, multiband: 0.6, glue: 0.5, saturation: 2, satMode: 'clip', resonance: 0.4, sectionDyn: 0.4, hfReserve: 0.5 } },
+  loud: { label: 'Loud', hint: 'Very loud and dense for competitive releases: heavier compression, sudden jumps tamed, sharp highs held back and a soft clipper before the limiter.', set: { targetLufs: -9, ceiling: -2, multiband: 0.6, glue: 0.5, saturation: 2, satMode: 'clip', resonance: 0.4, sectionDyn: 0.4, hfReserve: 0.5 } },
 };
 
 const pct = (v) => `${Math.round(v * 100)}%`;
@@ -53,9 +62,9 @@ const offPct = (v) => (v ? pct(v) : 'Off');
 
 const SCHEMA = [
   { title: 'Loudness and peaks', open: true, items: [
-    { key: 'delivery', label: 'Made for', type: 'select', options: [{ value: 'custom', label: 'Music (set loudness below)' }, ...Object.entries(DELIVERY).map(([value, d]) => ({ value, label: `${d.label}: ${d.lufs} LUFS, peaks ${d.ceiling} dBTP` }))], help: 'Video, ad, podcast and TV standards set the loudness and peak limit for you. Always check your platform’s own spec.' },
+    { key: 'delivery', label: 'Made for', type: 'select', options: [{ value: 'custom', label: 'Set loudness below' }, ...Object.entries(MASTER_DELIVERY).map(([value, d]) => ({ value, label: d.lufs == null ? `${d.label}: peaks ${d.ceiling} dBTP, shape kept` : `${d.label}: ${d.lufs} LUFS, peaks ${d.ceiling} dBTP` }))], help: 'Standards set the loudness and peak limit for you. Sound effects keep their shape, with the level set by the peak. Always check your platform’s own spec.' },
     { key: 'targetLufs', label: 'Loudness', type: 'range', min: -24, max: -6, step: 0.5, unit: ' LUFS', decimals: 1, help: 'How loud the finished song is. Streaming apps sit around -14; -9 is very loud.' },
-    { key: 'ceiling', label: 'Peak limit', type: 'range', min: -3, max: -0.1, step: 0.1, unit: ' dBTP', help: 'The loudest any moment can get. -1 stays clean on streaming apps.' },
+    { key: 'ceiling', label: 'Peak limit', type: 'range', min: -3, max: -0.1, step: 0.1, unit: ' dBTP', help: 'The loudest any moment can get. -1 stays clean on streaming apps; louder than -14 LUFS, use -2.' },
     { key: 'lookahead', label: 'Limiter reaction time', type: 'range', min: 1, max: 10, step: 0.5, unit: ' ms', help: 'How far ahead the limiter looks. Leave it unless hits sound dull.' },
     { key: 'release', label: 'Limiter recovery', type: 'range', min: 20, max: 400, step: 5, unit: ' ms', help: 'How fast the volume comes back after a peak. Faster is louder; slower is smoother.' },
     { key: 'hfReserve', label: 'Hold back sharp highs', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'When hi-hats or "s" sounds would hit the limiter, only the top end dips for that moment.' },
@@ -122,7 +131,7 @@ const SCHEMA = [
     { key: 'format', label: 'File type', type: 'select', options: [{ value: 'wav', label: 'WAV' }, { value: 'flac', label: 'FLAC (smaller, lossless)' }] },
     { key: 'bitDepth', label: 'Bit depth', type: 'select', numeric: true, options: [{ value: 16, label: '16-bit (CD)' }, { value: 24, label: '24-bit (recommended)' }, { value: 32, label: '32-bit float (WAV only)' }] },
     { key: 'dither', label: 'Dither', type: 'select', options: [{ value: 'tpdf', label: 'Standard' }, { value: 'shaped', label: 'Noise-shaped (best for 16-bit)' }, { value: 'none', label: 'None' }], help: 'Tiny noise that hides rounding errors. Leave it on Standard.' },
-    { key: 'outputRate', label: 'Sample rate', type: 'select', numeric: true, options: [{ value: 0, label: 'Same as source' }, { value: 44100, label: '44.1 kHz' }, { value: 48000, label: '48 kHz' }, { value: 88200, label: '88.2 kHz' }, { value: 96000, label: '96 kHz' }, { value: 192000, label: '192 kHz' }] },
+    { key: 'outputRate', label: 'Sample rate', type: 'select', numeric: true, options: [{ value: 0, label: 'Same as source' }, { value: 44100, label: '44.1 kHz' }, { value: 48000, label: '48 kHz' }, { value: 88200, label: '88.2 kHz' }, { value: 96000, label: '96 kHz' }, { value: 192000, label: '192 kHz' }], help: 'Keep it the same unless a spec asks otherwise. A higher rate adds no detail.' },
     { key: 'trim', label: 'Trim silence at the ends', type: 'toggle', help: 'Cuts silence at the start and end.' },
     { key: 'fadeIn', label: 'Fade in', type: 'range', min: 0, max: 5000, step: 50, unit: ' ms', zeroLabel: 'Off' },
     { key: 'fadeOut', label: 'Fade out', type: 'range', min: 0, max: 15000, step: 250, unit: ' ms', zeroLabel: 'Off' },
@@ -130,12 +139,13 @@ const SCHEMA = [
   { title: 'Extra versions', items: [
     { key: 'platformPack', label: 'A version for each platform', type: 'toggle', help: 'Also makes masters at -14 (streaming), -16 (Apple), -8 (club) and -23 LUFS (broadcast).' },
     { key: 'variations', label: 'Alternative takes', type: 'toggle', help: 'Also makes Transparent, Warm and Loud takes to compare.' },
+    { key: 'raw', label: 'Raw master', type: 'toggle', help: 'Everything except the final limiter, with all its peaks. For hi-fi releases, or mastering again elsewhere.' },
     { key: 'mono', label: 'Mono version', type: 'toggle', help: 'A single-speaker version at the same loudness.' },
     { key: 'vinyl', label: 'Vinyl / cassette version', type: 'toggle', help: 'A gentler version for cutting to vinyl or tape.' },
     { key: 'layers', label: 'Frequency layers', type: 'toggle', help: 'Low, mid and high files that add up to the master (not instrument stems).' },
     { key: 'loop', label: 'Seamless loop', type: 'toggle', help: 'A version whose end flows straight back into its start.' },
     { key: 'loopSeam', label: 'Loop crossfade length', type: 'range', min: 0.1, max: 4, step: 0.1, unit: ' s' },
-    { key: 'hiRes', label: 'Hi-res files in the release package', type: 'toggle', help: 'Adds 24-bit/96 kHz and 32-bit float WAVs to the release ZIP.' },
+    { key: 'hiRes', label: 'Hi-res files in the release package', type: 'toggle', help: 'Adds a 32-bit float WAV to the release ZIP, and a 24-bit 96 kHz one if the source is that high (raising the rate adds no detail).' },
     { key: 'spatial', label: 'Surround version', type: 'select', options: [{ value: 'off', label: 'Off' }, { value: '5.1', label: '5.1 speakers' }, { value: '7.1.4', label: '7.1.4 speakers (with height)' }], help: 'Spreads the master over surround speakers, plus a headphone version. Not a Dolby Atmos master.' },
     { key: 'spatialCentre', label: 'Centre speaker amount', type: 'range', min: 0, max: 1, step: 0.05, format: pct, help: 'How much of the centre (usually the vocal) goes to the middle speaker.' },
     { key: 'spatialSurround', label: 'Surround amount', type: 'range', min: 0, max: 1, step: 0.05, format: pct, help: 'How much of the room sound moves behind you (and above, in 7.1.4).' },
@@ -180,7 +190,8 @@ function easyMasterValues(e) {
   if (e.highs > 0.05) set.air = q(1.5 * e.highs, 0.5);
   if (e.highs > 0.5) set.deess = 0.45;
   if (e.tape > 0.01) { set.saturation = q(5 * e.tape, 0.5); set.satMode = 'tape'; }
-  return { values: { ...MASTER_DEFAULTS, ...set, targetLufs: EASY_LUFS, ceiling: -1 }, locked: Object.keys(set) };
+  // -2 dBTP: Spotify's advice for anything louder than -14 LUFS.
+  return { values: { ...MASTER_DEFAULTS, ...set, targetLufs: EASY_LUFS, ceiling: -2 }, locked: Object.keys(set) };
 }
 
 const STATE_KEY = 'mixit.master.v1';
@@ -215,9 +226,8 @@ export function initMaster({ engine, onMode }) {
   const profileDefaults = () => ({ ...MASTER_DEFAULTS, ...PROFILES[state.profile].set });
   const controls = buildSections($('m-controls'), SCHEMA, state.values, profileDefaults(), (key) => {
     // A delivery standard sets loudness and peaks; moving either by hand goes back to custom.
-    if (key === 'delivery' && DELIVERY[state.values.delivery]) {
-      state.values.targetLufs = DELIVERY[state.values.delivery].lufs;
-      state.values.ceiling = DELIVERY[state.values.delivery].ceiling;
+    if (key === 'delivery' && MASTER_DELIVERY[state.values.delivery]) {
+      keepStandard();
       controls.update(state.values);
     } else if ((key === 'targetLufs' || key === 'ceiling') && state.values.delivery !== 'custom') {
       state.values.delivery = 'custom';
@@ -227,15 +237,21 @@ export function initMaster({ engine, onMode }) {
     persist();
   });
 
+  function keepStandard() {
+    const std = MASTER_DELIVERY[state.values.delivery];
+    if (!std) return;
+    if (std.lufs != null) state.values.targetLufs = std.lufs;
+    state.values.ceiling = std.ceiling;
+  }
+
   const profiles = chipGroup($('m-profiles'), Object.entries(PROFILES).map(([k, p]) => [k, p.label]), state.profile, (key) => applyProfile(key));
   function applyProfile(key) {
     state.profile = key;
     state.locked.clear();
     const keep = Object.fromEntries(OUTPUT_ONLY.map((k) => [k, state.values[k]]));
     Object.assign(state.values, MASTER_DEFAULTS, PROFILES[key].set, keep);
-    // A chosen video, podcast or TV standard keeps its loudness and peak limit.
-    const std = DELIVERY[state.values.delivery];
-    if (std) Object.assign(state.values, { targetLufs: std.lufs, ceiling: std.ceiling });
+    // A chosen standard keeps its loudness and peak limit.
+    keepStandard();
     controls.update(state.values);
     $('m-profile-hint').textContent = PROFILES[key].hint;
     persist();
@@ -399,6 +415,7 @@ export function initMaster({ engine, onMode }) {
     const s = {};
     for (const k of Object.keys(MASTER_DEFAULTS)) if (!OUTPUT_ONLY.includes(k)) s[k] = v[k];
     if (job.profile === 'auto') { s.auto = true; s.locked = job.locked; }
+    if (v.delivery === 'sound') s.soundMode = true;
     return s;
   }
 
@@ -426,7 +443,7 @@ export function initMaster({ engine, onMode }) {
     const progressBox = job.progress;
     const baseSettings = engineSettings(job);
     const deliverables = {
-      platformPack: v.platformPack, variations: v.variations, mono: v.mono, vinyl: v.vinyl,
+      platformPack: v.platformPack, variations: v.variations, raw: v.raw, mono: v.mono, vinyl: v.vinyl,
       spatial: v.spatial !== 'off' ? { layout: v.spatial, centre: v.spatialCentre, surround: v.spatialSurround, lfeDb: v.spatialLfe <= -30 ? -99 : v.spatialLfe, targetLufs: -18, ceiling: -1 } : null,
     };
     const output = {
@@ -477,7 +494,7 @@ export function initMaster({ engine, onMode }) {
           binaural = { layout: sp.layout, chs: f.channels, lufs: f.lufs, dbtp: f.dbtp, maxGr: f.maxGr };
         }
         newResults.push({
-          name: entry.file.name, base: baseName(entry.file.name), sr: res.sr, binaural,
+          name: entry.file.name, base: baseName(entry.file.name), sr: res.sr, binaural, video: isVideoFile(entry.file) ? entry.file : null,
           source: { sr: res.sr, channels: res.source.channels },
           master: { sr: res.sr, channels: res.channels },
           extras: res.extras, report: res.report, output, profile: job.profile, easy: job.mode === 'easy', cohesion: trims?.[i] || null,
@@ -539,12 +556,14 @@ export function initMaster({ engine, onMode }) {
     const finishDesc = [r.output.finish.trim ? 'edge silence trimmed' : null, r.output.finish.fadeIn ? `${r.output.finish.fadeIn} ms fade-in` : null, r.output.finish.fadeOut ? `${r.output.finish.fadeOut} ms fade-out` : null].filter(Boolean).join(', ');
     resultsRoot.append(section('Download', downloadsRow(downloadItems(r)),
       el('p', { class: 'hint' }, `Master: ${fmtDesc}, ${r.output.outputRate ? `${r.output.outputRate / 1000} kHz` : 'same sample rate as the source'}${finishDesc ? `, ${finishDesc}` : ''}. Files are made right here; nothing is uploaded.`)));
-    const std = DELIVERY[r.output.delivery];
+    // A very short file is treated as a sound effect, whatever it was set to.
+    if (rep.soundMode && r.output.delivery !== 'sound') resultsRoot.append(el('p', { class: 'hint center' }, 'This is a short sound, so it kept its shape: its level is set by its peak, not by loudness.'));
+    const std = MASTER_DELIVERY[r.output.delivery];
     if (std) {
       const lufs = rep.output.loudness.integrated, tp = rep.output.peak.truePeakDbtp;
       const row = (ok, text) => el('li', {}, el('span', { class: `mark ${ok ? 'pass' : 'check'}` }, ok ? 'Pass' : 'Check'), el('span', {}, text));
       resultsRoot.append(section(`Delivery check: ${std.label}`, el('ul', { class: 'check-list' },
-        row(Math.abs(lufs - std.lufs) <= std.tolerance, `Loudness ${fx(lufs, 1)} LUFS (target ${std.lufs}, within ${std.tolerance})`),
+        std.lufs != null ? row(Math.abs(lufs - std.lufs) <= std.tolerance, `Loudness ${fx(lufs, 1)} LUFS (target ${std.lufs}, within ${std.tolerance})`) : null,
         row(tp <= std.ceiling + 0.05, `Peaks ${fx(tp, 1)} dBTP (at most ${std.ceiling})`)),
         el('p', { class: 'hint' }, 'These are common targets. Always check the delivery spec from your broadcaster, platform or client.')));
     }
@@ -674,7 +693,7 @@ export function initMaster({ engine, onMode }) {
       return { sr: audio.sr, channels: trimAndFade(audio.channels, audio.sr, { bounds, fadeInMs: f.fadeIn, fadeOutMs: f.fadeOut }).chs };
     };
     const loudnessOf = (lufs, dbtp, full) => (full ? { integrated: full.loudness.integrated, lra: full.loudness.lra, truePeak: full.peak.truePeakDbtp, momentaryMax: full.loudness.momentaryMax, shortTermMax: full.loudness.shortTermMax } : { integrated: lufs, truePeak: dbtp });
-    const encode = async (audio, name, { bits = out.bits, dither = out.dither, outputRate = out.outputRate, format = out.format, loudness = null, keepMono = false, kind = '', channelMask = 0 } = {}) => {
+    const encode = async (audio, name, { bits = out.bits, dither = out.dither, outputRate = out.outputRate, format = out.format, loudness = null, keepMono = false, kind = '', channelMask = 0, ceilingDb = rep.settings.ceiling } = {}) => {
       const a = finish(audio);
       if (a.channels.length > 2) format = 'wav';
       const bx = format === 'wav' ? {
@@ -683,7 +702,7 @@ export function initMaster({ engine, onMode }) {
         loudness,
         codingHistory: `A=PCM,F=${outputRate || a.sr},W=${bits},M=${a.channels.length === 1 && keepMono ? 'mono' : a.channels.length > 2 ? `${a.channels.length}ch` : 'stereo'},T=MIXIT`,
       } : null;
-      const { buffer } = await encodeForDownload(a, { bits, dither, outputRate, format, meta: { ...meta, loudness }, bext: bx, keepMono, channelMask });
+      const { buffer } = await encodeForDownload(a, { bits, dither, outputRate, format, meta: { ...meta, loudness }, bext: bx, keepMono, channelMask, ceilingDb });
       return { name, data: new Uint8Array(buffer) };
     };
     const masterLoud = loudnessOf(0, 0, rep.output);
@@ -696,7 +715,7 @@ export function initMaster({ engine, onMode }) {
       : encode(r.master, `${r.base}_master_24bit.wav`, { format: 'wav', bits: 24, loudness: masterLoud, kind: 'master' }));
     const extraFile = (e) => (e.layout
       ? encode({ sr: r.sr, channels: e.chs }, `${r.base}_${e.key}.wav`, { bits: out.bits === 16 ? 24 : out.bits, loudness: loudnessOf(e.lufs, e.dbtp), kind: e.label, channelMask: LAYOUTS[e.layout].mask })
-      : encode({ sr: r.sr, channels: e.chs }, `${r.base}_${e.key}.${ext}`, { loudness: loudnessOf(e.lufs, e.dbtp), keepMono: e.chs.length === 1, kind: e.label }));
+      : encode({ sr: r.sr, channels: e.chs }, `${r.base}_${e.key}.${ext}`, { bits: e.kind === 'raw' && out.bits === 16 ? 24 : out.bits, loudness: loudnessOf(e.lufs, e.dbtp), keepMono: e.chs.length === 1, kind: e.label, ceilingDb: Math.max(e.dbtp, rep.settings.ceiling) }));
     const binauralFile = () => encode({ sr: r.sr, channels: r.binaural.chs }, `${r.base}_binaural_${r.binaural.layout.replace(/\./g, '')}.${ext}`, { loudness: loudnessOf(r.binaural.lufs, r.binaural.dbtp), kind: `binaural ${r.binaural.layout}` });
     const reportJson = () => toJson({ file: r.name, profile: r.profile, renderedSeconds: r.seconds, cohesion: r.cohesion, ...rep, extras: r.extras.map(({ chs, ...e }) => e), binaural: r.binaural ? { layout: r.binaural.layout, lufs: r.binaural.lufs, dbtp: r.binaural.dbtp } : null });
     const lcsv = () => loudnessCsv([{ name: 'original', analysis: rep.input }, { name: 'master', analysis: rep.output }]);
@@ -736,7 +755,8 @@ export function initMaster({ engine, onMode }) {
       add(await altFile(), { kind: ext === 'wav' ? 'FLAC 24-bit' : 'WAV 24-bit', format: ext === 'wav' ? 'flac' : 'wav', ...lo });
       if (full) {
         if (out.deliver.hiRes) {
-          add(await encode(r.master, `${r.base}_hires_24bit_96k.wav`, { format: 'wav', bits: 24, outputRate: 96000, loudness: masterLoud, kind: 'hi-res' }), { kind: 'Hi-res WAV (24-bit, 96 kHz)', format: 'wav', ...lo });
+          // Only from a source that really is that high: raising the rate adds no detail.
+          if (r.sr >= 88200) add(await encode(r.master, `${r.base}_hires_24bit_96k.wav`, { format: 'wav', bits: 24, outputRate: 96000, loudness: masterLoud, kind: 'hi-res' }), { kind: 'Hi-res WAV (24-bit, 96 kHz)', format: 'wav', ...lo });
           add(await encode(r.master, `${r.base}_hires_32float.wav`, { format: 'wav', bits: 32, loudness: masterLoud, kind: 'hi-res float' }), { kind: 'Hi-res WAV (32-bit float)', format: 'wav', ...lo });
         }
         for (const e of r.extras) add(await extraFile(e), { kind: e.layout ? `${e.label} (${LAYOUTS[e.layout].channels.map((c) => c.id).join(' ')})` : e.label, format: e.layout ? 'wav' : ext, lufs: e.lufs, dbtp: e.dbtp });
@@ -779,6 +799,7 @@ export function initMaster({ engine, onMode }) {
       } },
       { label: `Master ${ext}`, sub: `${fx(f.lo.lufs, 1)} LUFS · ${fx(f.lo.dbtp, 1)} dBTP`, easy: true, run: save(f.masterFile, f.mime) },
       mp3Item(r.master, f.mp3File),
+      ...(r.video ? [{ label: 'Video with this sound', sub: 'picture untouched · AAC sound', easy: true, run: async () => download(await replaceVideoSound(r.video, r.master, { peakDbtp: f.lo.dbtp }), videoOutName(r.name, 'master')) }] : []),
       { label: 'CD-quality WAV', sub: '16-bit, 44.1 kHz', easy: true, run: save(f.cdFile, 'audio/wav') },
       { label: f.ext === 'wav' ? 'FLAC' : 'WAV 24-bit', sub: f.ext === 'wav' ? 'smaller, same quality' : 'uncompressed', easy: true, run: save(f.altFile, f.ext === 'wav' ? 'audio/flac' : 'audio/wav') },
       ...r.extras.map((e) => ({ label: `${e.label.replace(/ \(.*\)/, '')} ${e.layout ? 'WAV' : ext}`, sub: `${fx(e.lufs, 1)} LUFS${e.chs.length === 1 ? ' · mono' : e.layout ? ` · ${e.chs.length} channels` : ''}`, run: save(() => f.extraFile(e), e.layout ? 'audio/wav' : f.mime) })),

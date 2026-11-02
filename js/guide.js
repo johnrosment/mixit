@@ -18,12 +18,23 @@ export const GUIDE_HTML = `
 <h2>Videos, ads and podcasts</h2>
 <p>On the Mix page, switch <b>Song</b> to <b>Video, ad or podcast</b>. Stems are then sorted into <b>dialogue</b>, <b>music</b>, <b>effects</b> and <b>ambience</b> (names like "VO", "host", "dx", "SFX", "foley" or "room tone" are recognised).</p>
 <ul>
-  <li><b>Dialogue first.</b> Each voice is cleaned up, its quiet and loud phrases are evened out, and every speaker is brought to the same level before anything else is added. Song-style warmth, chorus and pitch work are left off.</li>
+  <li><b>Dialogue first.</b> Each voice is cleaned up (hum is found in the pauses and cut), its quiet and loud phrases are evened out, and every speaker is brought to the same level before anything else is added. Song-style warmth, chorus and pitch work are left off.</li>
+  <li><b>Two or more voices.</b> The mic being spoken into stays up and the others step back, so bleed and room noise don't pile up. When two people talk at once, each drops a little and the total stays even.</li>
+  <li><b>More room for words.</b> Speech peaks are spread out by rotating their phase. It sounds the same, but peaks drop 1 to 3 dB, so the limiter has less to do.</li>
   <li><b>Clean edits.</b> Mouth clicks, ticks and pops are taken out of dialogue, effects and ambience, and every place one of them starts or stops gets a short fade (1 frame unless you change it in Advanced), so no edit clicks. Words and hits keep their attack.</li>
   <li><b>Music, effects and ambience make room.</b> They step back while someone speaks, already down by the first word, and come back up in the pauses; the music also clears the range the words live in.</li>
-  <li><b>Made for.</b> Pick where it's going: online video (-14 LUFS), podcast (-16), TV in Europe (EBU R128, -23, peaks -1) or TV in the US (ATSC A/85, -24, peaks -2). These are common targets; always check the spec from your broadcaster, platform or client.</li>
-  <li><b>Delivery check.</b> The result lists whether loudness and peaks are within the standard, any dead air (silence of 2 seconds or more), and how even the voices are.</li>
-  <li>Mastering a finished ad or episode? On the Master page in Advanced, <b>Made for</b> sets the same standards.</li>
+  <li><b>Made for.</b> Pick where it's going: online video (-14 LUFS), podcast (-16), TV in Europe (EBU R128, -23, peaks -1), TV in the US (ATSC A/85, -24, peaks -2), or a streaming series or film (the dialogue itself at -27, peaks -2). These are common targets; always check the spec from your broadcaster, platform or client.</li>
+  <li><b>Your video.</b> Add an MP4 or MOV and you can download it with the finished mix inside. The picture isn't re-encoded, so it stays exactly as it was. The new sound is AAC, and lines up with the picture.</li>
+  <li><b>Stems.</b> Dialogue, music, effects and ambience come as separate files, plus music and effects without the dialogue, the usual file for dubbing and re-edits.</li>
+  <li><b>Delivery check.</b> The result lists whether loudness and peaks are within the standard, how loud the dialogue itself is, any dead air (silence of 2 seconds or more), and how even the voices are.</li>
+  <li>Mastering a finished ad or episode? On the Master page in Advanced, <b>Made for</b> sets the same standards. Drop in the video itself and you get it back with the new sound.</li>
+</ul>
+
+<h2>Sound effects and sound design</h2>
+<ul>
+  <li>A sound effect should keep its shape. On the Master page in Advanced, set <b>Made for</b> to <b>Sound effects and sound design</b>: there's no bus compression or limiting, sounds stay panned where you put them, each edge gets a tiny fade, and the level is set by the peak (-1 dBTP).</li>
+  <li>Any file under 6 seconds is treated this way automatically, on Easy too, as a short hit has no meaningful average loudness.</li>
+  <li>How loud should it be? In a mix, a sound's level is set against the dialogue, so use the Mix page. Games aim for the whole game's output rather than each file: about -24 LUFS on a TV, -18 on a handheld (ASWG-R001).</li>
 </ul>
 
 <h2>Mastering a song</h2>
@@ -63,7 +74,8 @@ export const GUIDE_HTML = `
 
 <h2>Files</h2>
 <ul>
-  <li><b>In:</b> WAV and AIFF (including the uncompressed AIFF that Logic and other Mac apps export) are read directly at their own sample rate. FLAC, MP3, M4A and OGG are decoded by the browser at 48 kHz. Surround files (5.1, 7.1) are folded down to stereo, centre included.</li>
+  <li><b>In:</b> WAV and AIFF (including the uncompressed AIFF that Logic and other Mac apps export) are read directly at their own sample rate. FLAC, MP3, M4A and OGG are decoded by the browser at 48 kHz, and so is the sound in an MP4 or MOV. Surround files (5.1, 7.1) are folded down to stereo, centre included.</li>
+  <li><b>Raw master</b> (Advanced): everything except the final limiter, with all its peaks, for hi-fi releases or mastering again elsewhere. Lossless services such as TIDAL play what you deliver, so 24-bit FLAC at your source's own rate is the file to send. A higher rate adds no detail.</li>
   <li><b>Alternate mixes</b> (Advanced, songs): vocal up 1 or 2 dB, bass up 1 dB, instrumental, a cappella, and a version without mix-bus processing for a mastering engineer.</li>
   <li><b>Out:</b> <b>Download all</b> packs everything into one ZIP, or grab each file on its own. A master comes as WAV, an MP3 for sharing, CD-quality WAV and FLAC with a quality report; a mix comes as WAV and MP3 with its stems (vocals, drums, bass, music, FX; or dialogue, music, effects and ambience for a video). The MP3 is 320 kbps, or a little lower for long songs so it stays under 10 MB. Advanced adds other bit depths and sample rates, versions for each platform, mono, vinyl, loops, frequency layers and 5.1 / 7.1.4 surround with a headphone version.</li>
 </ul>

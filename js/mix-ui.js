@@ -7,6 +7,7 @@ import { ABPlayer } from './player.js';
 import { makeZip } from './zip.js';
 import { renderBinaural } from './binaural.js';
 import { encodeMp3, mp3Bitrate, mp3SizeMb } from './mp3.js';
+import { isVideoFile, replaceVideoSound, videoOutName } from './video.js';
 import { chart, legend } from './charts.js';
 import { NOTE_NAMES, noteName } from './engine/pitch.js';
 import { LAYOUTS } from './engine/spatial.js';
@@ -53,7 +54,7 @@ export const MIX_DEFAULTS = {
   bitDepth: 24, dither: 'tpdf', outputRate: 0, renderBusStems: true,
   spatial: 'off', spatialCentre: 0.6, spatialLfe: -12,
   tuneKey: 'auto', sectionAuto: 0,
-  project: 'song', delivery: 'web', dialogueLeveler: 0.6, dialogueDenoise: 0, matchVoices: true, musicDuck: 6, musicCarve: 3, sfxDuck: 2, ambDuck: 3, dialogueRoom: 0, declick: 0.5, editFades: '1', frameRate: '29.97',
+  project: 'song', delivery: 'web', dialogueLeveler: 0.6, dialogueDenoise: 0, matchVoices: true, musicDuck: 6, musicCarve: 3, sfxDuck: 2, ambDuck: 3, dialogueRoom: 0, declick: 0.5, editFades: '1', frameRate: '29.97', dialogueHum: true, shareMics: true,
   vocalChorus: 0.06, drumParallel: 0.3, drumDrive: 0.35, bassGrit: 0.3, delaySync: true, musicCleanup: true, alternates: false,
 };
 
@@ -68,7 +69,7 @@ const STYLES = {
 
 const pct = (v) => `${Math.round(v * 100)}%`;
 const offPct = (v) => (v ? pct(v) : 'Off');
-const DELIVERY_OPTIONS = Object.entries(DELIVERY).map(([value, d]) => ({ value, label: `${d.label}: ${d.lufs} LUFS, peaks ${d.ceiling} dBTP` }));
+const DELIVERY_OPTIONS = Object.entries(DELIVERY).map(([value, d]) => ({ value, label: `${d.label}: ${d.gate ? 'dialogue at ' : ''}${d.lufs} LUFS, peaks ${d.ceiling} dBTP` }));
 const FADE_OPTIONS = [['0', 'Off'], ['0.5', '½ frame'], ['1', '1 frame'], ['2', '2 frames']].map(([value, label]) => ({ value, label }));
 const FPS_OPTIONS = [['23.976', '23.976 fps (film)'], ['24', '24 fps'], ['25', '25 fps (TV, Europe)'], ['29.97', '29.97 fps (TV, US)'], ['30', '30 fps']].map(([value, label]) => ({ value, label }));
 const SCHEMA = [
@@ -76,6 +77,8 @@ const SCHEMA = [
     { key: 'delivery', label: 'Made for', type: 'select', options: DELIVERY_OPTIONS, help: 'Sets the loudness and peak limit. These are common targets; always check your broadcaster’s or platform’s own delivery spec.' },
     { key: 'dialogueLeveler', label: 'Even out the voices', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'Rides quiet and loud phrases toward each voice’s usual level.' },
     { key: 'matchVoices', label: 'Match speakers', type: 'toggle', help: 'Brings every dialogue stem to the same loudness first, so no speaker is too quiet.' },
+    { key: 'shareMics', label: 'Step back idle mics', type: 'toggle', help: 'With two or more voices, the mic being spoken into stays up and the others step back, so bleed and room noise don’t pile up.' },
+    { key: 'dialogueHum', label: 'Remove hum', type: 'toggle', help: 'Finds mains hum (50 or 60 Hz) in the pauses and cuts just those notes. Leaves the voice alone if there is none.' },
     { key: 'dialogueDenoise', label: 'Clean up background noise', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'Lowers steady hiss, hum-free room noise and air conditioning under the voices.' },
     { key: 'declick', label: 'Remove clicks', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'Takes out mouth clicks, ticks and pops in dialogue, effects and ambience. Hits, and crackles that repeat (fire, rain), are left alone.' },
     { key: 'editFades', label: 'Fades on edits', type: 'select', options: FADE_OPTIONS, help: 'A short fade wherever dialogue, effects or ambience start or stop, so no edit clicks. Words and hits keep their attack.' },
@@ -147,8 +150,8 @@ const SCHEMA = [
     { key: 'ceiling', only: 'song', label: 'Peak limit (loud mode)', type: 'range', min: -3, max: -0.1, step: 0.1, unit: ' dBTP' },
     { key: 'bitDepth', label: 'Bit depth', type: 'select', numeric: true, options: [{ value: 16, label: '16-bit (CD)' }, { value: 24, label: '24-bit (recommended)' }, { value: 32, label: '32-bit float' }] },
     { key: 'dither', label: 'Dither', type: 'select', options: [{ value: 'tpdf', label: 'Standard' }, { value: 'shaped', label: 'Noise-shaped (best for 16-bit)' }, { value: 'none', label: 'None' }] },
-    { key: 'outputRate', label: 'Sample rate', type: 'select', numeric: true, options: [{ value: 0, label: 'Same as the stems' }, { value: 44100, label: '44.1 kHz' }, { value: 48000, label: '48 kHz' }, { value: 96000, label: '96 kHz' }, { value: 192000, label: '192 kHz' }] },
-    { key: 'renderBusStems', label: 'Also save each bus', type: 'toggle', help: { song: 'Vocals, drums, bass, music and FX as separate files.', post: 'Dialogue, music, effects and ambience as separate files.' } },
+    { key: 'outputRate', label: 'Sample rate', type: 'select', numeric: true, options: [{ value: 0, label: 'Same as the stems' }, { value: 44100, label: '44.1 kHz' }, { value: 48000, label: '48 kHz' }, { value: 96000, label: '96 kHz' }, { value: 192000, label: '192 kHz' }], help: 'Keep it the same unless a spec asks otherwise. A higher rate adds no detail.' },
+    { key: 'renderBusStems', label: 'Also save each bus', type: 'toggle', help: { song: 'Vocals, drums, bass, music and FX as separate files.', post: 'Dialogue, music, effects and ambience as separate files, plus music and effects without the dialogue.' } },
     { key: 'alternates', only: 'song', label: 'Alternate mixes', type: 'toggle', help: 'Also makes vocal up 1 and 2 dB, bass up 1 dB, instrumental, a cappella and a version without mix-bus processing. Takes longer.' },
   ] },
   { title: 'Surround', items: [
@@ -184,7 +187,8 @@ function easyMixValues(e) {
       reverbEnabled: e.verb > 0.02, reverbLevel: q(-20 + 12 * e.verb, 0.5), reverbDecay: q(1 + 1.4 * e.verb, 0.1),
       delayEnabled: e.echo > 0.02, delayLevel: q(-26 + 12 * e.echo, 0.5), delayFeedback: q(0.2 + 0.25 * e.echo, 0.01),
       mixTape: e.tape,
-      outputMode: 'loudness', targetLufs: EASY_LUFS, ceiling: -1, renderBusStems: true, spatial: 'off', sectionAuto: 0,
+      // -2 dBTP: Spotify's advice for anything louder than -14 LUFS.
+      outputMode: 'loudness', targetLufs: EASY_LUFS, ceiling: -2, renderBusStems: true, spatial: 'off', sectionAuto: 0,
     },
     buses: structuredClone(BUS_DEFAULTS),
   };
@@ -200,7 +204,7 @@ const EASY_POST = [
   { key: 'under', label: 'Music under the voices', help: 'How far the music drops while someone speaks.', min: 0, max: 1, def: 0.5, ends: ['A little', 'A lot'], show: (v) => `${(3 + 9 * v).toFixed(1)} dB` },
   { key: 'fx', label: 'Effects level', help: 'How loud the sound effects are.', min: -1, max: 1, def: 0, ends: ['Quieter', 'Louder'], show: (v) => easyWords(v, { lo: 'Quieter', hi: 'Louder', off: '' }) },
   { key: 'amb', label: 'Ambience level', help: 'Room tone and backgrounds.', min: -1, max: 1, def: 0, ends: ['Quieter', 'Louder'], show: (v) => easyWords(v, { lo: 'Quieter', hi: 'Louder', off: '' }) },
-  { key: 'delivery', label: 'Made for', help: 'Sets the loudness. Check your platform’s own spec.', options: Object.entries(DELIVERY).map(([value, d]) => ({ value, label: `${d.label} (${d.lufs} LUFS)` })) },
+  { key: 'delivery', label: 'Made for', help: 'Sets the loudness. Check your platform’s own spec.', options: Object.entries(DELIVERY).map(([value, d]) => ({ value, label: `${d.label} (${d.gate ? 'dialogue ' : ''}${d.lufs} LUFS)` })) },
 ];
 
 function easyPostValues(e) {
@@ -275,6 +279,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
   const state = {
     stems: [],
     rough: null,
+    video: null,
     style: saved?.style || 'clean',
     values: { ...MIX_DEFAULTS, ...(saved?.values || {}) },
     buses: { ...structuredClone(BUS_DEFAULTS), ...structuredClone(saved?.buses || {}) },
@@ -303,7 +308,8 @@ export function initMix({ engine, sendToMaster, onMode }) {
   };
   function renderEasyHint() {
     const hint = document.querySelector('#tab-mix .easy-view .render-bar + .hint');
-    if (hint) hint.textContent = project === 'post' ? `Comes out at ${DELIVERY[state.easyPost.delivery]?.label || 'your chosen'} loudness (${DELIVERY[state.easyPost.delivery]?.lufs} LUFS).` : 'Comes out at streaming volume (-12 LUFS).';
+    const d = DELIVERY[state.easyPost.delivery];
+    if (hint) hint.textContent = project === 'post' ? `Comes out at ${d?.label || 'your chosen'} loudness (${d?.gate ? 'dialogue at ' : ''}${d?.lufs} LUFS).` : 'Comes out at streaming volume (-12 LUFS).';
   }
   renderEasy();
   // Results sit under the Easy controls, or below the stem routing in Advanced.
@@ -313,7 +319,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
 
   const styleChips = chipGroup($('x-styles'), Object.entries(STYLES).map(([k, s]) => [k, s.label]), state.style, (key) => {
     state.style = key;
-    const keep = Object.fromEntries(['project', 'delivery', 'dialogueLeveler', 'dialogueDenoise', 'matchVoices', 'musicDuck', 'musicCarve', 'sfxDuck', 'ambDuck', 'dialogueRoom', 'declick', 'editFades', 'frameRate', 'bitDepth', 'dither', 'outputRate', 'renderBusStems', 'outputMode', 'headroom', 'targetLufs', 'ceiling', 'spatial', 'spatialCentre', 'spatialLfe'].map((k) => [k, state.values[k]]));
+    const keep = Object.fromEntries(['project', 'delivery', 'dialogueLeveler', 'dialogueDenoise', 'matchVoices', 'musicDuck', 'musicCarve', 'sfxDuck', 'ambDuck', 'dialogueRoom', 'declick', 'editFades', 'frameRate', 'dialogueHum', 'shareMics', 'bitDepth', 'dither', 'outputRate', 'renderBusStems', 'outputMode', 'headroom', 'targetLufs', 'ceiling', 'spatial', 'spatialCentre', 'spatialLfe'].map((k) => [k, state.values[k]]));
     Object.assign(state.values, MIX_DEFAULTS, STYLES[key].set, keep);
     state.buses = structuredClone(BUS_DEFAULTS);
     for (const [b, o] of Object.entries(STYLES[key].buses)) Object.assign(state.buses[b], o);
@@ -412,7 +418,12 @@ export function initMix({ engine, sendToMaster, onMode }) {
     };
   }
 
-  async function addFiles(files) {
+  async function addFiles(all) {
+    // In a video mix, a video dropped with the stems is the picture to put the mix back into.
+    const videos = project === 'post' ? all.filter(isVideoFile) : [];
+    if (videos.length) setVideo(videos[0]);
+    const files = all.filter((f) => !videos.includes(f));
+    if (!files.length) return;
     const fresh = files.map(makeStem);
     state.stems.push(...fresh);
     renderStems();
@@ -421,6 +432,21 @@ export function initMix({ engine, sendToMaster, onMode }) {
   }
   wireDrop($('x-drop'), $('x-file'), addFiles);
   wireDrop($('xe-drop'), $('xe-file'), addFiles);
+
+  // ---- Your video (optional): the finished mix goes back into it ----
+  function setVideo(file) {
+    state.video = file;
+    for (const id of ['x-video', 'xe-video']) {
+      const list = $(id);
+      list.innerHTML = '';
+      if (!file) continue;
+      list.append(el('li', {}, el('span', { class: 'name', title: file.name }, file.name), el('span', { class: 'meta' }, 'Picture stays as it is'),
+        el('button', { class: 'icon-btn', 'aria-label': `Remove ${file.name}`, onclick: () => setVideo(null) }, '×')));
+    }
+  }
+  const pickVideo = (files) => { if (isVideoFile(files[0])) setVideo(files[0]); else toast('That is not an MP4 or MOV.', { error: true }); };
+  wireDrop($('x-video-drop'), $('x-video-file'), pickVideo);
+  wireDrop($('xe-video-drop'), $('xe-video-file'), pickVideo);
 
   // ---- Your rough mix (optional balance and tone reference) ----
   async function addRough(files) {
@@ -563,7 +589,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
     return {
       ...s, mode: 'post', delivery: v.delivery, dialogueLeveler: v.dialogueLeveler, dialogueDenoise: v.dialogueDenoise, matchVoices: v.matchVoices,
       musicDuck: v.musicDuck, musicCarve: v.musicCarve, sfxDuck: v.sfxDuck, ambDuck: v.ambDuck,
-      declick: v.declick, editFades: v.editFades, frameRate: v.frameRate,
+      declick: v.declick, editFades: v.editFades, frameRate: v.frameRate, dialogueHum: v.dialogueHum, shareMics: v.shareMics,
       outputMode: 'loudness', targetLufs: d.lufs, ceiling: d.ceiling, riderStrength: 0, sectionAuto: 0, alternates: false,
       buses, reverb: { enabled: (v.dialogueRoom || 0) > 0.01, kind: 'room', decay: 0.6, predelay: 10, level: -16 }, delay: { enabled: false },
       vocalChorus: 0, mixTape: 0, mixGlue: 0.6 * v.mixGlue,
@@ -609,7 +635,8 @@ export function initMix({ engine, sendToMaster, onMode }) {
       if (job.mode === 'advanced' && project === 'song' && state.sectionEdits && state.sectionEdits.sig === stemSig()) settings.sections = state.sectionEdits.list;
       const t0 = performance.now();
       await engine.run('mixBegin', { settings, sr, length });
-      if (state.rough?.info?.valid) {
+      // (Easy hides the rough mix for a video, so one left from a song is not used.)
+      if (state.rough?.info?.valid && !(job.mode === 'easy' && project === 'post')) {
         setProgress(progressBox, `Reading your rough mix: ${state.rough.file.name}`, 0.01);
         const { payload, transfer } = await workerPayload(state.rough.file, state.rough.info, sr);
         await engine.run('mixRough', payload, transfer);
@@ -629,7 +656,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
         const f = await engine.run('finalize', { audio: { sr, channels: chs }, targetLufs: res.report.output.loudness.integrated, ceiling: o.outputMode === 'loudness' ? o.ceiling : o.headroom }, chs.map((c) => c.buffer));
         binaural = { layout: res.spatial.layout, chs: f.channels, lufs: f.lufs, dbtp: f.dbtp };
       }
-      state.result = { ...res, binaural, sr, style: job.style, seconds: (performance.now() - t0) / 1000, output: { bits: job.values.bitDepth, dither: job.values.dither, outputRate: job.values.outputRate } };
+      state.result = { ...res, binaural, sr, video: project === 'post' ? state.video : null, style: job.style, seconds: (performance.now() - t0) / 1000, output: { bits: job.values.bitDepth, dither: job.values.dither, outputRate: job.values.outputRate } };
       setProgress(progressBox, 'Mix ready', 1, 'done');
       renderResults();
       toast('Mix ready');
@@ -669,15 +696,15 @@ export function initMix({ engine, sendToMaster, onMode }) {
 
     const reportJson = () => toJson({ style: state.style, renderedSeconds: r.seconds, ...rep });
     const wav = async (chs, name, channelMask = 0) => {
-      const { buffer } = await encodeForDownload({ sr: r.sr, channels: chs }, { bits: chs.length > 2 && r.output.bits === 16 ? 24 : r.output.bits, dither: r.output.dither, outputRate: r.output.outputRate, meta: { software: 'MIXIT' }, channelMask });
+      const { buffer } = await encodeForDownload({ sr: r.sr, channels: chs }, { bits: chs.length > 2 && r.output.bits === 16 ? 24 : r.output.bits, dither: r.output.dither, outputRate: r.output.outputRate, meta: { software: 'MIXIT' }, channelMask, ceilingDb: rep.settings.outputMode === 'loudness' ? rep.settings.ceiling : null });
       return { name, data: new Uint8Array(buffer) };
     };
     const tag = r.spatial ? r.spatial.layout.replace(/\./g, '') : '';
     // Bus names as the render's project calls them (dialogue.wav, effects.wav in a video mix).
     const post = rep.settings.mode === 'post';
-    const BUS_NAMES = Object.fromEntries(post ? POST_CATEGORIES : SONG_CATEGORIES);
+    const BUS_NAMES = { ...Object.fromEntries(post ? POST_CATEGORIES : SONG_CATEGORIES), me: 'Music and effects' };
     const busName = (k) => BUS_NAMES[k] || k[0].toUpperCase() + k.slice(1);
-    const busFile = (k) => busName(k).toLowerCase();
+    const busFile = (k) => busName(k).toLowerCase().replace(/ /g, '_');
     // Download all: the mix and each bus stem; in Advanced also the surround
     // files and data files.
     const mixMp3 = async () => ({ name: 'mix.mp3', data: (await encodeMp3({ sr: r.sr, channels: r.channels }, { meta: { title: 'Mix' }, peakDbtp: out.peak.truePeakDbtp })).data });
@@ -698,6 +725,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
       { label: 'Download all (ZIP)', sub: r.busStems ? 'the mix and every stem below' : 'every file below', primary: true, easy: true, run: async () => download(makeZip(await packageFiles(document.documentElement.dataset.mode !== 'easy')), 'mix_all.zip') },
       { label: 'Mix WAV', sub: `${fx(out.loudness.integrated, 1)} LUFS · ${fx(out.peak.truePeakDbtp, 1)} dBTP`, easy: true, run: async () => { const f = await wav(r.channels, 'mix.wav'); download(f.data, f.name, 'audio/wav'); } },
       { label: 'Mix MP3', sub: `${kbps} kbps · about ${mp3SizeMb(kbps, secs).toFixed(1)} MB · for sharing`, easy: true, run: async () => { const f = await mixMp3(); download(f.data, f.name, 'audio/mpeg'); } },
+      ...(r.video ? [{ label: 'Video with this mix', sub: 'picture untouched · AAC sound', easy: true, run: async () => download(await replaceVideoSound(r.video, { sr: r.sr, channels: r.channels }, { peakDbtp: out.peak.truePeakDbtp }), videoOutName(r.video.name, 'mix')) }] : []),
       ...Object.entries(r.busStems || {}).map(([k, chs]) => ({ label: `${busName(k)} stem`, sub: 'WAV, processed', easy: true, run: async () => { const f = await wav(chs, `${busFile(k)}.wav`); download(f.data, f.name, 'audio/wav'); } })),
     ];
     if (r.spatial) {
@@ -721,7 +749,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
     if (rep.log.length) root.append(section('What the mix engine did', el('ul', { class: 'reasons' }, rep.log.map((l) => el('li', {}, l)))));
 
     const grid = el('div', { class: 'chart-grid' });
-    grid.append(loudnessChart([{ label: 'Mix', color: '--accent', analysis: out }], { target: rep.settings.outputMode === 'loudness' ? rep.settings.targetLufs : null }));
+    grid.append(loudnessChart([{ label: 'Mix', color: '--accent', analysis: out }], { target: rep.settings.outputMode === 'loudness' && !rep.delivery?.gate ? rep.settings.targetLufs : null }));
     const bs = rep.busSpectra;
     const busEntries = Object.entries(bs.levels).map(([k, levels]) => ({ label: busName(k), color: BUS_COLORS[k], centers: bs.centers, levels }));
     grid.append(spectrumChart([...busEntries, { label: 'Mix', color: '--text', centers: out.spectrum.bands.centers, levels: out.spectrum.bands.levels, dash: [5, 4], width: 1.2 }],
@@ -794,7 +822,12 @@ export function initMix({ engine, sendToMaster, onMode }) {
     const row = (ok, text, mark = ok ? 'Pass' : 'Check') => el('li', {}, el('span', { class: `mark ${ok ? 'pass' : 'check'}` }, mark), el('span', {}, text));
     const items = [];
     if (d.targetLufs != null) {
-      items.push(row(d.loudnessOk, `Loudness ${fx(d.achievedLufs, 1)} LUFS (target ${d.targetLufs}, within ${d.tolerance})`));
+      if (d.gate && d.dialogueLufs != null) {
+        items.push(row(d.loudnessOk, `Dialogue ${fx(d.dialogueLufs, 1)} LUFS (target ${d.targetLufs}, within ${d.tolerance}); whole programme ${fx(d.achievedLufs, 1)} LUFS`));
+      } else {
+        items.push(row(d.loudnessOk, `Loudness ${fx(d.achievedLufs, 1)} LUFS (target ${d.targetLufs}, within ${d.tolerance})`));
+        if (d.dialogueLufs != null) items.push(row(true, `Dialogue ${fx(d.dialogueLufs, 1)} LUFS while someone speaks`, 'Info'));
+      }
       items.push(row(d.peakOk, `Peaks ${fx(d.truePeakDbtp, 1)} dBTP (at most ${d.ceiling})`));
     }
     items.push(row(!d.deadAir.length, d.deadAir.length ? `Silence of 2 s or more at ${d.deadAir.map((x) => `${fmtT(x.start)}–${fmtT(x.end)}`).join(', ')}` : 'No dead air (no silence of 2 s or more)'));
