@@ -1,5 +1,6 @@
 // Mix tab: stem import and routing, style, bus settings, rendering and results.
 
+import { autoMixSliders, autoPostSliders } from './engine/automix.js';
 import { el, buildSections, buildEasy, easyWords, chipGroup, toast, wireDrop, setProgress, storage, store } from './controls.js';
 import { probeFile, workerPayload, framesAt, encodeForDownload, download, describeInfo } from './audio-io.js';
 import { encodeWav } from './engine/wav.js';
@@ -65,7 +66,18 @@ const STYLES = {
   dense: { label: 'Dense', set: { mixGlue: 0.5, duckAmount: 4, transientEnergy: 0.6, riderStrength: 0.6 }, buses: { drums: { glue: 0.3 }, vocals: { glue: 0.25 }, music: { glue: 0.2 } } },
   vocal: { label: 'Vocal forward', set: { vocalLevel: 2, vocalPresence: 0.66, duckAmount: 4.5, riderStrength: 0.6 }, buses: { music: { tone: 'dark' } } },
   wide: { label: 'Wide', set: { stereoWidth: 0.78, reverbKind: 'hall', reverbDecay: 2.2, reverbLevel: -12 }, buses: { music: { width: 1.15 }, fx: { width: 1.25 } } },
+  // Every control at the point where it changes nothing (Default everything).
+  flat: {
+    label: 'Flat',
+    set: {
+      autoBalance: false, balanceAmount: 0, roughTone: 0, vocalLevel: 0, vocalPresence: 0.5, riderStrength: 0, transientEnergy: 0.5, bassTightness: 0, bassDuck: 0, drumParallel: 0, drumDrive: 0, bassGrit: 0, stereoWidth: 0.5,
+      duckAmount: 0, vocalChorus: 0, mixLow: 0, mixHigh: 0, mixTape: 0, musicCleanup: false, sectionAuto: 0, reverbEnabled: false, delayEnabled: false, mixGlue: 0,
+    },
+    post: { dialogueLeveler: 0, dialogueDenoise: 0, matchVoices: false, shareMics: false, dialogueHum: false, declick: 0, editFades: '0', dialogueRoom: 0, musicDuck: 0, musicCarve: 0, sfxDuck: 0, ambDuck: 0 },
+    buses: Object.fromEntries(Object.keys(BUS_DEFAULTS).map((k) => [k, { gain: 0, glue: 0, tone: 'neutral', width: 1, sendReverb: 0, sendDelay: 0 }])),
+  },
 };
+const FLAT_STEM = { hpf: 0, hpfAuto: false, comp: 0, deess: false, width: 1, monoBass: false, tune: 0 };
 
 const pct = (v) => `${Math.round(v * 100)}%`;
 const offPct = (v) => (v ? pct(v) : 'Off');
@@ -116,7 +128,7 @@ const SCHEMA = [
     { key: 'mixLow', label: 'Lows', type: 'range', min: -6, max: 6, step: 0.5, unit: ' dB', signed: true, help: 'Adds or removes weight across the whole mix.' },
     { key: 'mixHigh', label: 'Highs', type: 'range', min: -6, max: 6, step: 0.5, unit: ' dB', signed: true, help: 'Adds or removes brightness across the whole mix.' },
     { key: 'mixTape', only: 'song', label: 'Vintage tape', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'Warmth and a softer top end, like an old tape machine.' },
-    { key: 'musicCleanup', label: 'Clean up muddy instruments', type: 'toggle', help: 'Cuts muddy or boxy build-up in the instruments where it stands out.' },
+    { key: 'musicCleanup', label: 'Clean up muddy instruments', type: 'toggle', help: 'Gently cuts muddy or boxy build-up in the instruments where it stands out. Left out when there are no drums or vocals to make room for.' },
   ] },
   { title: 'Pitch correction', only: 'song', items: [
     { key: 'tuneKey', label: 'Key', type: 'select', options: [
@@ -143,7 +155,7 @@ const SCHEMA = [
     { key: 'delayLevel', label: 'Echo level', type: 'range', min: -30, max: 0, step: 0.5, unit: ' dB' },
   ] },
   { title: 'Finishing and files', items: [
-    { key: 'mixGlue', label: 'Glue', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'Gentle compression that makes it feel like one performance.' },
+    { key: 'mixGlue', label: 'Glue', type: 'range', min: 0, max: 1, step: 0.05, format: offPct, help: 'Gentle compression that makes it feel like one performance. With no drums or vocals it stays off unless you move it or a bus’s glue.' },
     { key: 'outputMode', only: 'song', label: 'Output level', type: 'select', options: [{ value: 'headroom', label: 'Ready for mastering (leave room)' }, { value: 'loudness', label: 'Loud (finished level)' }], help: 'Ready for mastering leaves room for the Master page. Loud sounds finished.' },
     { key: 'headroom', only: 'song', label: 'Peak level (for mastering)', type: 'range', min: -12, max: -1, step: 0.5, unit: ' dBTP' },
     { key: 'targetLufs', only: 'song', label: 'Loudness (loud mode)', type: 'range', min: -20, max: -8, step: 0.5, unit: ' LUFS' },
@@ -174,6 +186,10 @@ const EASY = [
   { key: 'echo', label: 'Echo', help: 'Repeats that trail off.', min: 0, max: 1, def: 0, ends: ['None', 'Lots'], show: offPct },
   { key: 'tape', label: 'Vintage tape', help: 'A warm, old-tape sound.', min: 0, max: 1, def: 0, ends: ['Clean', 'Warm tape'], show: offPct },
 ];
+
+// Where each slider changes nothing: the middle, or off.
+const EASY_NEUTRAL = { vocal: 0, clarity: 0, lows: 0, highs: 0, punch: 0.5, verb: 0, echo: 0, tape: 0 };
+const EASY_POST_NEUTRAL = { clarity: 0, even: 0, clean: 0, music: 0, under: 0, fx: 0, amb: 0 };
 
 /** Full mix settings for the Easy sliders (a finished, loud mix). */
 function easyMixValues(e) {
@@ -309,24 +325,34 @@ export function initMix({ engine, sendToMaster, onMode }) {
   function renderEasyHint() {
     const hint = document.querySelector('#tab-mix .easy-view .render-bar + .hint');
     const d = DELIVERY[state.easyPost.delivery];
-    if (hint) hint.textContent = project === 'post' ? `Comes out at ${d?.label || 'your chosen'} loudness (${d?.gate ? 'dialogue at ' : ''}${d?.lufs} LUFS).` : 'Comes out at streaming volume (-12 LUFS).';
+    if (hint) hint.textContent = `${project === 'post' ? `Comes out at ${d?.label || 'your chosen'} loudness (${d?.gate ? 'dialogue at ' : ''}${d?.lufs} LUFS).` : 'Comes out at streaming volume (-12 LUFS).'} Auto mix listens first, then sets the sliders and mixes.`;
   }
   renderEasy();
   // Results sit under the Easy controls, or below the stem routing in Advanced.
-  onMode((mode) => $(mode === 'easy' ? 'xe-results-slot' : 'x-results-slot').append($('x-results')));
+  onMode((mode) => {
+    $(mode === 'easy' ? 'xe-results-slot' : 'x-results-slot').append($('x-results'));
+    // Flat belongs to Advanced: Easy always mixes with the stems' usual settings.
+    if (state.style === 'flat' && state.stems.length) { for (const st of state.stems) resetStem(st, mode); renderStems(); }
+  });
 
   const controls = buildSections($('x-controls'), SCHEMA, state.values, MIX_DEFAULTS, () => persist());
 
-  const styleChips = chipGroup($('x-styles'), Object.entries(STYLES).map(([k, s]) => [k, s.label]), state.style, (key) => {
+  const styleChips = chipGroup($('x-styles'), Object.entries(STYLES).map(([k, s]) => [k, s.label]), state.style, (key) => selectStyle(key));
+  function selectStyle(key) {
+    const wasFlat = state.style === 'flat';
     state.style = key;
     const keep = Object.fromEntries(['project', 'delivery', 'dialogueLeveler', 'dialogueDenoise', 'matchVoices', 'musicDuck', 'musicCarve', 'sfxDuck', 'ambDuck', 'dialogueRoom', 'declick', 'editFades', 'frameRate', 'dialogueHum', 'shareMics', 'bitDepth', 'dither', 'outputRate', 'renderBusStems', 'outputMode', 'headroom', 'targetLufs', 'ceiling', 'spatial', 'spatialCentre', 'spatialLfe'].map((k) => [k, state.values[k]]));
-    Object.assign(state.values, MIX_DEFAULTS, STYLES[key].set, keep);
+    // (Flat's zeros on the dialogue tools are not carried away from it.)
+    const unflat = wasFlat ? Object.fromEntries(Object.keys(STYLES.flat.post).map((k) => [k, MIX_DEFAULTS[k]])) : null;
+    Object.assign(state.values, MIX_DEFAULTS, STYLES[key].set, keep, unflat, STYLES[key].post);
     state.buses = structuredClone(BUS_DEFAULTS);
     for (const [b, o] of Object.entries(STYLES[key].buses)) Object.assign(state.buses[b], o);
     controls.update(state.values);
     renderBuses();
+    // Leaving Flat gives the stems their usual settings back; going to it takes them off.
+    if (key === 'flat' || wasFlat) { for (const st of state.stems) resetStem(st); renderStems(); }
     persist();
-  });
+  }
 
   // ---- Buses panel ----
   function renderBuses() {
@@ -415,7 +441,13 @@ export function initMix({ engine, sendToMaster, onMode }) {
       gain: 0, pan: category === 'vocals' ? rolePan(role) : sidePan(file.name), mute: false, solo: false, polarity: false,
       eqLow: 0, eqMid: 0, eqHigh: 0, open: false, panTouched: false,
       ...STEM_DEFAULTS[category],
+      ...(state.style === 'flat' ? { pan: 0, ...FLAT_STEM } : null),
     };
+  }
+  // Back to the stem's starting point. Its bus, mute, solo and polarity are your routing, and stay.
+  function resetStem(st, mode = document.documentElement.dataset.mode) {
+    const flat = state.style === 'flat' && mode !== 'easy';
+    Object.assign(st, { gain: 0, eqLow: 0, eqMid: 0, eqHigh: 0, hpfAuto: true, panTouched: false, tune: 0, pan: st.category === 'vocals' ? rolePan(st.role) : sidePan(st.name) }, STEM_DEFAULTS[st.category], flat ? { pan: 0, ...FLAT_STEM } : null);
   }
 
   async function addFiles(all) {
@@ -564,7 +596,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
     const valid = state.stems.filter((s) => s.info?.valid);
     const dur = Math.max(0, ...valid.map((s) => s.info.duration));
     $('x-stem-count').textContent = state.stems.length ? `${state.stems.length} stem${state.stems.length > 1 ? 's' : ''} · ${dur ? `${Math.floor(dur / 60)}:${String(Math.round(dur % 60)).padStart(2, '0')}` : ''}` : '';
-    renderBtn.disabled = easyBtn.disabled = state.busy || !valid.length || state.stems.some((s) => !s.info) || (state.rough && !state.rough.info);
+    renderBtn.disabled = easyBtn.disabled = $('x-auto').disabled = $('xe-auto').disabled = state.busy || !valid.length || state.stems.some((s) => !s.info) || (state.rough && !state.rough.info);
     easyBtn.textContent = valid.length ? `Mix ${valid.length} stem${valid.length > 1 ? 's' : ''}` : 'Mix it';
   }
   renderStems();
@@ -604,6 +636,8 @@ export function initMix({ engine, sendToMaster, onMode }) {
         comp: s.comp, compMode: s.compMode, deess: s.deess, width: s.width, monoBass: s.monoBass,
         eqLow: s.eqLow, eqMid: s.eqMid, eqHigh: s.eqHigh, tune: s.category === 'vocals' ? s.tune || 0 : 0, tuneSpeed: s.tuneSpeed ?? 40,
       })),
+      flat: job.mode === 'advanced' && state.style === 'flat',
+      glueTouched: v.mixGlue !== MIX_DEFAULTS.mixGlue || Object.keys(BUS_DEFAULTS).some((k) => job.buses[k]?.glue !== BUS_DEFAULTS[k].glue),
       tuneKey: v.tuneKey, sectionAuto: v.sectionAuto, mixLow: v.mixLow, mixHigh: v.mixHigh, mixTape: v.mixTape,
       vocalChorus: v.vocalChorus, drumParallel: v.drumParallel, drumDrive: v.drumDrive, bassGrit: v.bassGrit, delaySync: v.delaySync, musicCleanup: v.musicCleanup, alternates: v.alternates,
       autoBalance: v.autoBalance, balanceAmount: v.balanceAmount, roughTone: v.roughTone, vocalLevel: v.vocalLevel, vocalPresence: v.vocalPresence, riderStrength: v.riderStrength, riderWindow: v.riderWindow,
@@ -619,6 +653,66 @@ export function initMix({ engine, sendToMaster, onMode }) {
 
   renderBtn.addEventListener('click', () => render(renderJob('advanced')));
   easyBtn.addEventListener('click', () => render(renderJob('easy')));
+  $('x-auto').addEventListener('click', () => autoMix('advanced'));
+  $('xe-auto').addEventListener('click', () => autoMix('easy'));
+  $('xe-reset').addEventListener('click', () => {
+    if (project === 'post') Object.assign(state.easyPost, EASY_POST_NEUTRAL);
+    else Object.assign(state.easy, EASY_NEUTRAL);
+    for (const st of state.stems) resetStem(st);
+    renderEasy();
+    renderStems();
+    persist();
+    toast('Every slider is back to the middle or off.');
+  });
+  $('x-reset').addEventListener('click', () => {
+    styleChips.set('flat');
+    selectStyle('flat');
+    toast('Every control is back to where it changes nothing.');
+  });
+
+  // Listen to the stems, set the Easy sliders from what is heard, then mix.
+  async function autoMix(mode) {
+    const anySolo = state.stems.some((s) => s.solo && !s.mute);
+    const stems = state.stems.filter((s) => s.info?.valid && !s.mute && (!anySolo || s.solo));
+    if (!stems.length || state.busy) return;
+    const box = mode === 'easy' ? $('xe-progress') : $('x-progress');
+    state.busy = true;
+    renderStems();
+    let auto = null;
+    try {
+      const rows = [];
+      for (let i = 0; i < stems.length; i++) {
+        setProgress(box, `Listening to stem ${i + 1}/${stems.length}: ${stems[i].name}`, (i / stems.length) * 0.9);
+        const { payload, transfer } = await workerPayload(stems[i].file, stems[i].info);
+        const m = await engine.run('measureStem', { ...payload, noise: project === 'post' && stems[i].category === 'vocals' }, transfer);
+        rows.push({ category: stems[i].category, role: stems[i].role, m });
+      }
+      auto = project === 'post' ? autoPostSliders(rows) : autoMixSliders(rows, { rough: !!state.rough?.info?.valid });
+    } catch (err) {
+      console.error(err);
+      setProgress(box, `Stopped: ${err.message}`, 1, 'failed');
+      toast(`Auto mix failed: ${err.message}`, { error: true, ms: 6000 });
+    }
+    state.busy = false;
+    if (!auto) { renderStems(); return; }
+    Object.assign(project === 'post' ? state.easyPost : state.easy, auto.sliders);
+    if (mode === 'advanced') {
+      // Advanced takes the same choices, keeping its own output and file settings.
+      const m = project === 'post' ? easyPostValues(state.easyPost) : easyMixValues(state.easy);
+      const keep = Object.fromEntries(['project', 'delivery', 'bitDepth', 'dither', 'outputRate', 'renderBusStems', 'outputMode', 'headroom', 'targetLufs', 'ceiling', 'spatial', 'spatialCentre', 'spatialLfe', 'alternates'].map((k) => [k, state.values[k]]));
+      Object.assign(state.values, m.values, keep);
+      state.buses = m.buses;
+      state.style = 'clean';
+      styleChips.set('clean');
+      controls.update(state.values);
+      renderBuses();
+    }
+    for (const st of state.stems) resetStem(st);
+    renderEasy();
+    renderStems();
+    persist();
+    render({ ...renderJob(mode), style: 'Auto mix', autoNotes: auto.reasons });
+  }
   async function render(job) {
     const stems = state.stems.filter((s) => s.info?.valid);
     if (!stems.length || state.busy) return;
@@ -636,13 +730,24 @@ export function initMix({ engine, sendToMaster, onMode }) {
       const t0 = performance.now();
       await engine.run('mixBegin', { settings, sr, length });
       // (Easy hides the rough mix for a video, so one left from a song is not used.)
+      let readShare = 0;
       if (state.rough?.info?.valid && !(job.mode === 'easy' && project === 'post')) {
         setProgress(progressBox, `Reading your rough mix: ${state.rough.file.name}`, 0.01);
         const { payload, transfer } = await workerPayload(state.rough.file, state.rough.info, sr);
-        await engine.run('mixRough', payload, transfer);
+        const { readStems } = await engine.run('mixRough', payload, transfer);
+        for (const [k, i] of readStems.entries()) {
+          setProgress(progressBox, `Finding each stem in your rough mix: ${k + 1}/${readStems.length}`, 0.01 + (k / readStems.length) * 0.14);
+          const stem = await workerPayload(stems[i].file, stems[i].info, sr);
+          await engine.run('mixRoughStem', { ...stem.payload, index: i }, stem.transfer);
+        }
+        if (readStems.length) {
+          setProgress(progressBox, 'Reading each stem’s level', 0.15);
+          await engine.run('mixRoughFit', {});
+          readShare = 0.16;
+        }
       }
       for (let i = 0; i < stems.length; i++) {
-        setProgress(progressBox, `Processing stem ${i + 1}/${stems.length}: ${stems[i].name}`, (i / stems.length) * 0.6);
+        setProgress(progressBox, `Processing stem ${i + 1}/${stems.length}: ${stems[i].name}`, readShare + (i / stems.length) * (0.6 - readShare));
         const { payload, transfer } = await workerPayload(stems[i].file, stems[i].info, sr);
         await engine.run('mixStem', { ...payload, index: i }, transfer);
       }
@@ -656,7 +761,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
         const f = await engine.run('finalize', { audio: { sr, channels: chs }, targetLufs: res.report.output.loudness.integrated, ceiling: o.outputMode === 'loudness' ? o.ceiling : o.headroom }, chs.map((c) => c.buffer));
         binaural = { layout: res.spatial.layout, chs: f.channels, lufs: f.lufs, dbtp: f.dbtp };
       }
-      state.result = { ...res, binaural, sr, video: project === 'post' ? state.video : null, style: job.style, seconds: (performance.now() - t0) / 1000, output: { bits: job.values.bitDepth, dither: job.values.dither, outputRate: job.values.outputRate } };
+      state.result = { ...res, binaural, sr, video: project === 'post' ? state.video : null, style: job.style, autoNotes: job.autoNotes, seconds: (performance.now() - t0) / 1000, output: { bits: job.values.bitDepth, dither: job.values.dither, outputRate: job.values.outputRate } };
       setProgress(progressBox, 'Mix ready', 1, 'done');
       renderResults();
       toast('Mix ready');
@@ -685,6 +790,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
           el('div', { class: 'sub' }, `${r.style} · ${(r.sr / 1000).toFixed(1)} kHz · made in ${r.seconds.toFixed(1)} s on this computer`))),
       kpis(null, out)));
 
+    if (r.autoNotes) root.append(el('div', { class: 'card auto-notes' }, el('h2', {}, 'What Auto mix heard'), el('ul', {}, r.autoNotes.map((n) => el('li', {}, n)))));
     const playerCard = el('div', { class: 'card' }, el('div', { class: 'card-head' }, el('h2', {}, 'Compare'), el('span', { class: 'hint' }, 'Unprocessed sum = stems added together with no processing.')));
     root.append(playerCard);
     player = new ABPlayer(playerCard);
@@ -852,6 +958,10 @@ export function initMix({ engine, sendToMaster, onMode }) {
     else {
       const notes = [Math.abs(f.lagSec) >= 0.02 ? `it starts ${Math.abs(f.lagSec).toFixed(2)} s ${f.lagSec > 0 ? 'later' : 'earlier'} than the stems` : null, f.errDb >= 0.1 ? `matched to within ${fx(f.errDb, 1)} dB` : null].filter(Boolean);
       lines.push(`Levels follow your rough mix${notes.length ? ` (${notes.join('; ')})` : ''}.`);
+      if (f.stems) {
+        lines.push(`Each stem was set to its level in it. Compared with your files: ${f.stems.map((x) => `${x.name} ${fx(x.db, 1)} dB`).join(', ')}.`);
+        if (f.share < 0.75) lines.push(`Your stems make up about ${Math.round(f.share * 100)}% of its sound, so it holds something else too: parts you did not add, or effects.`);
+      } else if (f.stemsUnread) lines.push('It does not match the stems sample for sample, so stems in the same group keep their own balance.');
     }
     if (rough.tone) lines.push(`The final tone moved toward it at ${Math.round(rough.tone.strength * 100)}% strength, ${fx(4 * rough.tone.strength, 1)} dB at most.`);
     const card = section('Your rough mix', el('p', { class: 'hint' }, lines.join(' ')));

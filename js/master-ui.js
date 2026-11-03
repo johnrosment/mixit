@@ -1,6 +1,7 @@
 // Master tab: files, references and sound profiles, profile chips, controls,
 // presets, batch rendering (with release cohesion) and results.
 
+import { autoMasterSliders } from './engine/automix.js';
 import { el, buildSections, buildEasy, easyWords, chipGroup, toast, wireDrop, setProgress, storage, store } from './controls.js';
 import { probeFile, workerPayload, encodeForDownload, download, baseName, describeInfo, resample } from './audio-io.js';
 import { ABPlayer } from './player.js';
@@ -54,6 +55,7 @@ export const PROFILES = {
   warm: { label: 'Warm', hint: 'Darker, rounder and softer. Good for bright or harsh mixes.', set: { tilt: -1, high: -0.5, saturation: 3, satMode: 'tube', glue: 0.35, resonance: 0.35 } },
   bright: { label: 'Bright', hint: 'More presence and sparkle, with extra smoothing so it never gets harsh.', set: { tilt: 1, air: 1.5, deess: 0.45, resonance: 0.5 } },
   loud: { label: 'Loud', hint: 'Very loud and dense for competitive releases: heavier compression, sudden jumps tamed, sharp highs held back and a soft clipper before the limiter.', set: { targetLufs: -9, ceiling: -2, multiband: 0.6, glue: 0.5, saturation: 2, satMode: 'clip', resonance: 0.4, sectionDyn: 0.4, hfReserve: 0.5 } },
+  flat: { label: 'Flat', hint: 'Every control at the point where it changes nothing. Only the loudness and peak limit apply.', set: { hpf: 0, refStrength: 0, profileWidth: 0, resonance: 0, deess: 0, multiband: 0, glue: 0, balanceRepair: false } },
 };
 
 const pct = (v) => `${Math.round(v * 100)}%`;
@@ -165,6 +167,8 @@ const SCHEMA = [
 // ---- Easy page: eight plain sliders mapped onto the full chain ----
 const EASY_LUFS = -12;
 const EASY_DEFAULTS = { lows: 0, highs: 0, punch: 0.5, width: 0.5, clean: 0.3, verb: 0, tape: 0, hiss: 0 };
+// Where each slider changes nothing: the middle, or off.
+const EASY_NEUTRAL = { lows: 0, highs: 0, punch: 0.5, width: 0.5, clean: 0, verb: 0, tape: 0, hiss: 0 };
 const EASY = [
   { key: 'lows', label: 'Lows', help: 'Kick and bass weight.', min: -1, max: 1, def: 0, ends: ['Lighter', 'Heavier'], show: (v) => easyWords(v, { lo: 'Lighter', hi: 'Heavier', off: '' }) },
   { key: 'highs', label: 'Highs', help: 'Cymbals and sparkle.', min: -1, max: 1, def: 0, ends: ['Darker', 'Brighter'], show: (v) => easyWords(v, { lo: 'Darker', hi: 'Brighter', off: '' }) },
@@ -189,6 +193,8 @@ function easyMasterValues(e) {
   };
   if (e.highs > 0.05) set.air = q(1.5 * e.highs, 0.5);
   if (e.highs > 0.5) set.deess = 0.45;
+  // Clean-up off means off: no smoothing, and no automatic cuts in its place.
+  if (e.clean < 0.01) Object.assign(set, { resonance: 0, deMud: 0, nasalCut: 0, harshCut: 0 });
   if (e.tape > 0.01) { set.saturation = q(5 * e.tape, 0.5); set.satMode = 'tape'; }
   // -2 dBTP: Spotify's advice for anything louder than -14 LUFS.
   return { values: { ...MASTER_DEFAULTS, ...set, targetLufs: EASY_LUFS, ceiling: -2 }, locked: Object.keys(set) };
@@ -219,7 +225,7 @@ export function initMaster({ engine, onMode }) {
   const easyBtn = $('me-render');
 
   const persist = () => store(STATE_KEY, { profile: state.profile, values: state.values, locked: [...state.locked], sound: state.sound, easy: state.easy });
-  buildEasy($('me-controls'), EASY, state.easy, persist);
+  const easyControls = buildEasy($('me-controls'), EASY, state.easy, persist);
   // Results sit under the Easy controls, or in the right-hand column in Advanced.
   onMode((mode) => $(mode === 'easy' ? 'me-results-slot' : 'm-results-slot').append(resultsRoot));
 
@@ -301,7 +307,7 @@ export function initMaster({ engine, onMode }) {
     const hasRef = !!activeProfile() || state.refs.some((r) => r.info?.valid);
     for (const k of ['refStrength', 'profileWidth', 'profileLoudness']) controls.setDisabled(k, !hasRef);
     const valid = state.files.filter((f) => f.info?.valid);
-    renderBtn.disabled = easyBtn.disabled = state.busy || !valid.length || state.files.some((f) => !f.info) || state.refs.some((r) => !r.info);
+    renderBtn.disabled = easyBtn.disabled = $('m-auto').disabled = $('me-auto').disabled = state.busy || !valid.length || state.files.some((f) => !f.info) || state.refs.some((r) => !r.info);
     renderBtn.textContent = valid.length > 1 ? `Master ${valid.length} tracks` : 'Master track';
     easyBtn.textContent = valid.length > 1 ? `Master ${valid.length} songs` : 'Master it';
   }
@@ -434,6 +440,63 @@ export function initMaster({ engine, onMode }) {
 
   renderBtn.addEventListener('click', () => render(renderJob('advanced')));
   easyBtn.addEventListener('click', () => render(renderJob('easy')));
+  $('me-reset').addEventListener('click', () => {
+    Object.assign(state.easy, EASY_NEUTRAL);
+    easyControls.update(state.easy);
+    persist();
+    toast('Every slider is back to the middle or off.');
+  });
+  $('m-reset').addEventListener('click', () => {
+    profiles.set('flat');
+    applyProfile('flat');
+    toast('Every control is back to where it changes nothing.');
+  });
+  $('m-auto').addEventListener('click', () => autoMaster('advanced'));
+  $('me-auto').addEventListener('click', () => autoMaster('easy'));
+  // What Auto chose for one song, as engine values. Advanced keeps its own output and file settings.
+  function autoValues(auto, job) {
+    const m = easyMasterValues(auto.sliders);
+    const keep = job.mode === 'advanced' ? Object.fromEntries(OUTPUT_KEYS.map((k) => [k, job.values[k]])) : null;
+    return { values: { ...m.values, ...auto.extra, ...keep }, locked: [...m.locked, ...Object.keys(auto.extra)] };
+  }
+  // Listen to each song, set the controls from what is heard, then master. Each song in a batch gets its own.
+  async function autoMaster(mode) {
+    const queue = state.files.filter((f) => f.info?.valid);
+    if (!queue.length || state.busy) return;
+    const box = mode === 'easy' ? $('me-progress') : $('m-progress');
+    state.busy = true;
+    renderFiles();
+    const autoFor = new Map();
+    try {
+      for (let i = 0; i < queue.length; i++) {
+        setProgress(box, `Listening to ${queue[i].file.name}`, (i / queue.length) * 0.9);
+        const t = await workerPayload(queue[i].file, queue[i].info);
+        const { analysis } = await engine.run('analyze', t.payload, t.transfer);
+        autoFor.set(queue[i], autoMasterSliders(analysis, { reference: state.refs.some((r) => r.info?.valid) || (mode === 'advanced' && !!activeProfile()) }));
+      }
+    } catch (err) {
+      console.error(err);
+      setProgress(box, `Stopped: ${err.message}`, 1, 'failed');
+      toast(`Auto master failed: ${err.message}`, { error: true, ms: 6000 });
+      autoFor.clear();
+    }
+    state.busy = false;
+    if (!autoFor.size) { renderFiles(); return; }
+    if (mode === 'advanced') { profiles.set('auto'); applyProfile('auto'); }
+    if (queue.length === 1) {
+      const auto = autoFor.get(queue[0]);
+      Object.assign(state.easy, auto.sliders);
+      easyControls.update(state.easy);
+      if (mode === 'advanced') {
+        const m = autoValues(auto, renderJob('advanced'));
+        Object.assign(state.values, m.values);
+        state.locked = new Set(m.locked);
+        controls.update(state.values);
+      }
+      persist();
+    }
+    render({ ...renderJob(mode), autoFor });
+  }
   async function render(job) {
     const queue = state.files.filter((f) => f.info?.valid);
     if (!queue.length || state.busy) return;
@@ -480,7 +543,9 @@ export function initMaster({ engine, onMode }) {
             transfer.push(...w.transfer);
           }
         }
-        const settings = trims ? { ...baseSettings, tiltTrim: trims[i].tiltTrim, widthTrim: trims[i].widthTrim } : baseSettings;
+        const auto = job.autoFor?.get(entry);
+        const settings = auto ? engineSettings({ ...autoValues(auto, job), profile: 'auto' })
+          : trims ? { ...baseSettings, tiltTrim: trims[i].tiltTrim, widthTrim: trims[i].widthTrim } : baseSettings;
         const t0 = performance.now();
         const res = await engine.run('master', { track: track.payload, references, profile: saved, settings, deliverables }, transfer,
           (stage, f) => setProgress(progressBox, `${label}${stage}`, base + (1 - base) * ((i + f) / queue.length)));
@@ -497,7 +562,7 @@ export function initMaster({ engine, onMode }) {
           name: entry.file.name, base: baseName(entry.file.name), sr: res.sr, binaural, video: isVideoFile(entry.file) ? entry.file : null,
           source: { sr: res.sr, channels: res.source.channels },
           master: { sr: res.sr, channels: res.channels },
-          extras: res.extras, report: res.report, output, profile: job.profile, easy: job.mode === 'easy', cohesion: trims?.[i] || null,
+          extras: res.extras, report: res.report, output, profile: job.profile, easy: job.mode === 'easy', autoNotes: auto?.reasons || null, cohesion: trims?.[i] || null,
           hasRef: !!res.report.profile, seconds: (performance.now() - t0) / 1000,
         });
       }
@@ -530,13 +595,14 @@ export function initMaster({ engine, onMode }) {
     const head = el('div', { class: 'card' },
       el('div', { class: 'result-head' },
         el('div', {}, el('div', { class: 'title' }, r.name),
-          el('div', { class: 'sub' }, `${r.easy ? 'Easy' : `${PROFILES[r.profile]?.label || r.profile} profile`} · ${(r.sr / 1000).toFixed(1)} kHz · made in ${r.seconds.toFixed(1)} s on this computer${rep.profile ? ` · ${rep.profile.name ? `profile “${rep.profile.name}”` : `${rep.profile.count} reference${rep.profile.count > 1 ? 's' : ''}`} matched` : ''}`)),
+          el('div', { class: 'sub' }, `${r.autoNotes ? 'Auto master' : r.easy ? 'Easy' : `${PROFILES[r.profile]?.label || r.profile} profile`} · ${(r.sr / 1000).toFixed(1)} kHz · made in ${r.seconds.toFixed(1)} s on this computer${rep.profile ? ` · ${rep.profile.name ? `profile “${rep.profile.name}”` : `${rep.profile.count} reference${rep.profile.count > 1 ? 's' : ''}`} matched` : ''}`)),
         state.results.length > 1 ? el('label', { class: 'batch-select' }, 'Track',
           (() => { const s = el('select', {}, state.results.map((x, i) => el('option', { value: i }, x.name))); s.value = String(state.selected); s.addEventListener('change', () => { state.selected = Number(s.value); renderResults(); }); return s; })()) : null),
       kpis(rep.input, rep.output));
     resultsRoot.append(head);
     const warn = callouts(rep.warnings);
     if (warn) resultsRoot.append(warn);
+    if (r.autoNotes) resultsRoot.append(el('div', { class: 'card auto-notes' }, el('h2', {}, 'What Auto master heard'), el('ul', {}, r.autoNotes.map((n) => el('li', {}, n)))));
 
     const playerCard = el('div', { class: 'card' }, el('div', { class: 'card-head' }, el('h2', {}, 'Compare'), el('span', { class: 'hint' }, 'Switch versions while playing; position is kept. Level and Monitor change how every version is heard.')));
     resultsRoot.append(playerCard);

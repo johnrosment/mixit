@@ -15,6 +15,7 @@ account to make and nothing to install.
 1. **[Open MIXIT](https://mixit-opal.vercel.app)** and choose **Mix**, **Master** or **Analyze**.
 2. **Drop your files.** WAV, AIFF, FLAC, MP3 and M4A all work.
 3. **Shape the sound** with eight simple sliders in **Easy**, or switch to **Advanced** for every setting.
+   **Auto mix** and **Auto master** listen first and set the sliders for you. **Default everything** puts them back to the middle or off.
 4. **Compare** before and after at the same volume, then **Download all** as one ZIP or save each file on its own.
    The MP3 is 320 kbps, or a little lower for long songs so it stays under 10 MB for easy sharing.
 
@@ -23,7 +24,7 @@ account to make and nothing to install.
 ### Mix
 - Sorts your stems into vocals, drums, bass, music and FX by their names.
 - Balances them, keeps the vocal steady over the music, and adds reverb, echo and glue.
-- Drop in your own rough bounce and MIXIT copies its balance.
+- Drop in your own rough bounce, or the finished song, and MIXIT copies each stem's level.
 - **Easy sliders:** vocal level, vocal clarity, lows, highs, punch, reverb, echo, vintage tape.
 - **You get:** the mix as a WAV and an MP3, plus each part (vocals, drums, bass, music) as its own file.
 

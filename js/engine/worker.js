@@ -6,6 +6,7 @@ import { MixSession } from './mix.js';
 import { parseWav } from './wav.js';
 import { parseAiff } from './aiff.js';
 import { learnProfile } from './profile.js';
+import { measureStem } from './automix.js';
 
 let session = null;
 
@@ -62,6 +63,9 @@ self.onmessage = (ev) => {
       const audio = toAudio(payload);
       const result = analyze(audio, { progress, repairScan: !!payload.repairScan });
       self.postMessage({ id, type: 'result', data: { analysis: result, sr: audio.sr } });
+    } else if (type === 'measureStem') {
+      const audio = toAudio(payload);
+      self.postMessage({ id, type: 'result', data: measureStem(audio.channels, audio.sr, { noise: !!payload.noise }) });
     } else if (type === 'decode') {
       const audio = toAudio(payload);
       self.postMessage({ id, type: 'result', data: audio }, buffersOf(audio.channels));
@@ -95,6 +99,13 @@ self.onmessage = (ev) => {
       const audio = toAudio(payload);
       if (audio.sr !== session.sr) throw new Error(`Rough mix sample rate ${audio.sr} does not match the session (${session.sr}).`);
       self.postMessage({ id, type: 'result', data: session.setRoughMix(audio) });
+    } else if (type === 'mixRoughStem') {
+      if (!session) throw new Error('No mix session is open.');
+      session.readRoughStem(payload.index, toAudio(payload));
+      self.postMessage({ id, type: 'result', data: { ok: true } });
+    } else if (type === 'mixRoughFit') {
+      if (!session) throw new Error('No mix session is open.');
+      self.postMessage({ id, type: 'result', data: session.fitRoughStems() });
     } else if (type === 'mixFinish') {
       if (!session) throw new Error('No mix session is open.');
       const res = session.finish(progress);

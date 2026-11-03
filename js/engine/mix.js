@@ -12,8 +12,8 @@ import { finalize } from './master.js';
 import { bedFromBuses, loudnessWeights, channelLevels } from './spatial.js';
 import { tuneVocal, SCALES } from './pitch.js';
 import { detectSections, sectionMoves, sectionCurve } from './sections.js';
-import { roughFeatures, stemFeatures, addFeatures, fitBalance } from './roughmix.js';
-import { lowCutFreq, resonantCuts } from './stemtools.js';
+import { roughFeatures, stemFeatures, addFeatures, fitBalance, waveStep, waveCopy, fitStemLevels } from './roughmix.js';
+import { lowCutFreq, resonantCuts, buildUpCuts } from './stemtools.js';
 import { levelSpeech, duckUnderSpeech, deliveryCheck, fadeEdits, mouthDeclick, rotatePhase, shareMics, dialogueLoudness, FRAME_RATES, DELIVERY } from './post.js';
 import { denoise, detectClicks, repairClicks, detectHumInPauses, removeHum } from './repair.js';
 
@@ -28,6 +28,7 @@ const VOICE_LUFS = -24; // each voice is brought to this before the bus, so spea
 const SUPPORT_OFFSET = -6; // doubles/backing relative to lead vocal
 const ROUGH_MAX_ERR_DB = 4; // a rough mix further from the stems than this is the wrong file
 const ROUGH_MAX_DB = 4; // the most its tone can move the finished mix
+const ROUGH_LEFT_OUT_DB = -24; // a stem barely found in it stays this far under the loudest
 // Video, ad and podcast stems that get click removal and edit fades.
 const EDIT_KINDS = { vocals: 'dialogue', fx: 'effects', ambience: 'ambience' };
 
@@ -107,6 +108,9 @@ function stats(arr) {
   return { maxGr: -min, avgGr: -sum / arr.length, activePct: (100 * active) / arr.length };
 }
 
+// The bus a stem counts toward when matching your rough mix.
+const roughBusOf = (st) => (st.category in BUS_TARGETS ? st.category : 'music');
+
 export class MixSession {
   constructor(settings, sr, length) {
     this.s = settings;
@@ -130,7 +134,47 @@ export class MixSession {
   setRoughMix(audio) {
     this.rough = roughFeatures(audio.channels, this.sr);
     this.roughBus = {};
-    return { lufs: this.rough.lufs, seconds: this.rough.seconds };
+    // Two or more stems: each one's level is read from it before the render.
+    const heard = this.s.stems.flatMap((st, i) => (!st.mute && (!this.anySolo || st.solo) ? [i] : []));
+    const readStems = this.s.autoBalance !== false && heard.length > 1 ? heard : [];
+    if (readStems.length) {
+      this.waveStep = waveStep(this.sr, this.n, readStems.length);
+      this.roughWave = waveCopy(audio.channels, this.waveStep, this.n);
+      this.stemWaves = {};
+      this.stemsToRead = readStems;
+    }
+    return { lufs: this.rough.lufs, seconds: this.rough.seconds, readStems };
+  }
+
+  /** One stem as it comes, before any processing, for reading its level from your rough mix. */
+  readRoughStem(index, audio) {
+    this.stemWaves[index] = waveCopy(audio.channels, this.waveStep, this.n);
+  }
+
+  /** Each stem's level from your rough mix, once all are read. Every level then stays relative within its bus. */
+  fitRoughStems() {
+    const read = this.stemsToRead;
+    const fit = fitStemLevels(read.map((i) => this.stemWaves[i]), this.roughWave, this.sr / this.waveStep);
+    this.stemWaves = this.roughWave = null;
+    this.stemsUnread = !fit;
+    if (!fit) return { read: false };
+    const found = fit.db.filter((v) => v != null);
+    if (!found.length) { this.stemsUnread = true; return { read: false }; }
+    const top = Math.max(...found);
+    const levels = read.map((i, j) => ({ i, db: fit.db[j] == null ? null : Math.max(fit.db[j], top + ROUGH_LEFT_OUT_DB) }));
+    const busDb = {};
+    for (const { i, db } of levels) {
+      if (db == null) continue;
+      const k = roughBusOf(this.s.stems[i]);
+      busDb[k] = Math.max(busDb[k] ?? -Infinity, db);
+    }
+    this.stemGains = {};
+    for (const { i, db } of levels) if (db != null) this.stemGains[i] = db - busDb[roughBusOf(this.s.stems[i])];
+    // A voice that gets matched to the others afterwards does not keep this level, so it is not listed.
+    const matched = (st) => this.s.mode === 'post' && st.category === 'vocals' && this.s.matchVoices !== false;
+    const stems = levels.filter(({ i, db }) => db != null && !matched(this.s.stems[i])).map(({ i, db }) => ({ name: this.s.stems[i].name, db: db - top }));
+    this.stemFit = { busDb, offsetSec: fit.offsetSec, share: fit.share, stems };
+    return { read: true, stems, share: fit.share };
   }
 
   addStem(index, audio) {
@@ -192,9 +236,11 @@ export class MixSession {
       } else row.steps.push(`Pitch correction skipped: ${r.reason}`);
       row.tune = r;
     }
-    gain(chs, st.gain || 0);
+    const fromRough = this.stemGains?.[index] || 0;
+    gain(chs, (st.gain || 0) + fromRough);
+    if (fromRough) row.steps.push(`Level from your rough mix: ${fmt(fromRough)} dB`);
     // Unprocessed levels per bus for matching your rough mix (after your stem gain).
-    if (this.rough && audible) { const k = st.category in BUS_TARGETS ? st.category : 'music'; this.roughBus[k] = addFeatures(this.roughBus[k], stemFeatures(chs, sr)); }
+    if (this.rough && audible) { const k = roughBusOf(st); this.roughBus[k] = addFeatures(this.roughBus[k], stemFeatures(chs, sr)); }
     // High-pass everything but kick and bass: raised to just under where the
     // stem's useful low end starts (at most the cap for its type).
     let hpf = st.hpf || 0;
@@ -213,13 +259,13 @@ export class MixSession {
       row.steps.push(`De-ess active ${d.activePct.toFixed(1)}%, max ${d.maxGr.toFixed(1)} dB`);
     }
     // Harsh, metallic cymbals: a de-esser tuned higher.
-    if (st.category === 'drums' && st.drumRole === 'cymbals' && audible) {
+    if (st.category === 'drums' && st.drumRole === 'cymbals' && audible && !this.s.flat) {
       const d = deess(chs, sr, { amount: 0.35, split: 6000 });
       row.steps.push(`Cymbal harshness tamed: active ${d.activePct.toFixed(1)}%, max ${d.maxGr.toFixed(1)} dB above 6 kHz`);
     }
     if (st.category === 'vocals' && audible) {
       // Narrow cuts where the voice sounds boxy (400-800 Hz) or nasal (2-4 kHz).
-      const cuts = resonantCuts(chs, sr, [[400, 800, 'boxy'], [2000, 4000, 'nasal']], { minDb: 4, maxCut: 2.5, q: 4, trendBands: 4 });
+      const cuts = this.s.flat ? [] : resonantCuts(chs, sr, [[400, 800, 'boxy'], [2000, 4000, 'nasal']], { minDb: 4, maxCut: 2.5, q: 4, trendBands: 4 });
       if (cuts.length) {
         toneEq(chs, sr, { extra: cuts.map((c) => ({ type: 'peaking', freq: c.freq, q: c.q, gain: c.gainDb })) });
         row.steps.push(`Narrow ${cuts.map((c) => `${fmt(c.gainDb)} dB at ${c.freq} Hz (${c.range})`).join(', ')}`);
@@ -236,11 +282,15 @@ export class MixSession {
       }
     }
     if (st.comp > 0.01) {
+      // A music stem keeps its level: a sparse part would otherwise lose more
+      // than a steady pad and slip back in your balance.
+      const keepLufs = st.category === 'music' ? integratedLufs(chs, sr) : -Infinity;
       const c = compress(chs, sr, compSettings(st));
+      if (keepLufs > -70) gain(chs, keepLufs - integratedLufs(chs, sr));
       row.comp = { ...c, curve: undefined };
       row.steps.push(`Compression ${c.ratio.toFixed(1)}:1 (${st.compMode === 'punch' ? 'punch' : 'smooth'}${st.drumRole ? `, ${st.drumRole}` : ''}), avg ${c.avgGr.toFixed(1)} dB, max ${c.maxGr.toFixed(1)} dB`);
     }
-    if (!post && st.category === 'vocals' && audible) {
+    if (!post && st.category === 'vocals' && audible && !this.s.flat) {
       // Light tape saturation on top for character.
       saturate(chs, sr, { drive: 3, mode: 'tape', mix: 0.3 });
       row.steps.push('Light tape saturation (30% blend)');
@@ -286,14 +336,15 @@ export class MixSession {
       if (shared) log.push(`${shared.mics} voices share the level: the mic being spoken into stays up and the others step back, so bleed and room noise do not pile up.`);
     }
     // Lower dialogue peaks at the same loudness, so the limiter has less to do.
-    if (post && this.used.vocalLead && s.phaseRotate !== false) {
+    if (post && this.used.vocalLead && s.phaseRotate !== false && !s.flat) {
       const r = rotatePhase(B.vocalLead, sr);
       if (r) log.push(`Dialogue peaks lowered ${r.dropDb.toFixed(1)} dB by rotating their phase; loudness and tone are unchanged.`);
     }
 
     // --- Does your rough mix belong to these stems? A wrong file steers nothing. ---
-    const roughFit = this.rough ? fitBalance(Object.fromEntries(BUS_KEYS.filter((k) => this.roughBus[k]).map((k) => [k, this.roughBus[k]])), this.rough) : null;
-    const roughOk = !!roughFit && roughFit.errDb <= ROUGH_MAX_ERR_DB;
+    // (Stems found in it sample for sample settle that, however much it was processed.)
+    const roughFit = this.rough ? fitBalance(Object.fromEntries(BUS_KEYS.filter((k) => this.roughBus[k]).map((k) => [k, this.roughBus[k]])), this.rough, this.stemFit) : null;
+    const roughOk = !!roughFit && (!!this.stemFit || roughFit.errDb <= ROUGH_MAX_ERR_DB);
 
     // --- Vocal lead / support balance ---
     progress('Balancing vocals', 0.05);
@@ -317,6 +368,12 @@ export class MixSession {
     const buses = { vocals, drums: B.drums, bass: B.bass, music: B.music, fx: B.fx, ambience: B.ambience };
     const used = { vocals: this.used.vocalLead || this.used.vocalSupport, drums: this.used.drums, bass: this.used.bass, music: this.used.music, fx: this.used.fx, ambience: this.used.ambience };
     B.vocalSupport = null;
+    // With no drums or vocals there is nothing to make room for, and on held
+    // sounds glue only rides the quiet and loud sections. Both step aside
+    // (glue only if you left it alone).
+    const noRoomNeeded = !used.vocals && !used.drums;
+    const skipGlue = noRoomNeeded && !s.glueTouched;
+    if (noRoomNeeded && (skipGlue || (used.music && s.musicCleanup !== false))) log.push(`No drums or vocals: ${[used.music && s.musicCleanup !== false ? 'instrument clean-up' : '', skipGlue ? 'glue' : ''].filter(Boolean).join(' and ')} left out, as there is nothing to make room for.`);
 
     // --- Source-aware balance, or the balance of your rough mix ---
     progress('Balancing buses', 0.12);
@@ -339,6 +396,8 @@ export class MixSession {
       const shift = tot((k) => targets[k]) - tot((k) => before[k] + Math.max(target(k), even(k) - 24));
       rough = { ...fit, gains: Object.fromEntries(keys.map((k) => [k, Math.max(-40, Math.min(40, Math.max(target(k) + shift, even(k) - 24)))])) };
       log.push(`Balance from your rough mix (lined up${Math.abs(fit.lagSec) >= 0.02 ? ` with a ${fit.lagSec.toFixed(2)} s offset` : ''}, fits within ${fit.errDb.toFixed(1)} dB): ${keys.map((k) => `${k} ${fmt(rough.gains[k])} dB`).join(', ')}.`);
+      if (this.stemFit) log.push(`Each stem's level read from it: ${this.stemFit.stems.map((x) => `${x.name} ${fmt(x.db)} dB`).join(', ')}. The stems account for ${Math.round(this.stemFit.share * 100)}% of its sound.`);
+      else if (this.stemsUnread) log.push('Your rough mix does not match these stems sample for sample, so each bus follows it as a whole and the stems within a bus keep their own balance.');
     }
     const amount = s.balanceAmount ?? 1;
     for (const key of keys) {
@@ -395,9 +454,11 @@ export class MixSession {
       }
       if (key === 'bass') {
         const t = s.bassTightness ?? 0.5;
-        toneEq(b, sr, { hpf: 25 + t * 20, extra: [{ type: 'peaking', freq: 250, q: 1, gain: -t * 2 }] });
-        const c = compress(b, sr, { ratio: 2 + 3 * t, attack: 10, release: 90, knee: 6, rmsMs: 8, thresholdPct: 0.7, thresholdOffset: -6 * t });
-        rep.tightness = `HPF ${(25 + t * 20).toFixed(0)} Hz, 250 Hz ${fmt(-t * 2)} dB, compression avg ${c.avgGr.toFixed(1)} dB`;
+        if (!s.flat || t > 0.01) {
+          toneEq(b, sr, { hpf: 25 + t * 20, extra: [{ type: 'peaking', freq: 250, q: 1, gain: -t * 2 }] });
+          const c = compress(b, sr, { ratio: 2 + 3 * t, attack: 10, release: 90, knee: 6, rmsMs: 8, thresholdPct: 0.7, thresholdOffset: -6 * t });
+          rep.tightness = `HPF ${(25 + t * 20).toFixed(0)} Hz, 250 Hz ${fmt(-t * 2)} dB, compression avg ${c.avgGr.toFixed(1)} dB`;
+        }
         const grit = s.bassGrit ?? 0.3;
         if (grit > 0.01) {
           // Harmonics of the bass's own notes, kept above 300 Hz, so it is heard on small speakers.
@@ -420,9 +481,9 @@ export class MixSession {
         const w = s.stereoWidth ?? 0.5;
         width(b, { amount: 0.6 + 0.8 * w, sr, monoHz: 0 });
         rep.width = 0.6 + 0.8 * w;
-        if (s.musicCleanup !== false) {
-          // Muddy (150-500 Hz) or boxy (500 Hz-1 kHz) build-up in the instruments is cut where it stands out.
-          const cuts = resonantCuts(b, sr, [[150, 500, 'muddy'], [500, 1000, 'boxy']], { minDb: 3, maxCut: 3, q: 1.4 });
+        if (s.musicCleanup !== false && !noRoomNeeded) {
+          // Muddy (150-500 Hz) or boxy (500 Hz-1 kHz) build-up in the instruments is cut gently where it stands out.
+          const cuts = buildUpCuts(b, sr, [[150, 500, 'muddy'], [500, 1000, 'boxy']]);
           if (cuts.length) {
             toneEq(b, sr, { extra: cuts.map((c) => ({ type: 'peaking', freq: c.freq, q: c.q, gain: c.gainDb })) });
             rep.cleanup = cuts.map((c) => `${fmt(c.gainDb)} dB at ${c.freq} Hz (${c.range})`).join(', ');
@@ -431,7 +492,7 @@ export class MixSession {
       }
       if (TONES[cfg.tone] && TONES[cfg.tone].length) toneEq(b, sr, { extra: TONES[cfg.tone] });
       if ((cfg.width ?? 1) !== 1) width(b, { amount: cfg.width, sr, monoHz: 0 });
-      if ((cfg.glue || 0) > 0.01) {
+      if ((cfg.glue || 0) > 0.01 && !skipGlue) {
         const c = compress(b, sr, { ratio: 1.5 + 2.5 * cfg.glue, attack: 20, release: glueRelease || 150, knee: 8, rmsMs: 10, thresholdPct: 0.7, thresholdOffset: -6 * cfg.glue, adaptive: true });
         rep.glue = { ratio: c.ratio, avgGr: c.avgGr, maxGr: c.maxGr };
       }
@@ -618,7 +679,7 @@ export class MixSession {
         if (!quiet) log.push(`Mix-bus tone: lows ${fmt(lows)} dB at 120 Hz, highs ${fmt(highs - 1.5 * tape)} dB above 8 kHz${tape > 0.01 ? `, tape saturation ${(5 * tape).toFixed(1)} dB drive` : ''}.`);
       }
       let glue = null;
-      if ((s.mixGlue || 0) > 0.01) {
+      if ((s.mixGlue || 0) > 0.01 && !skipGlue) {
         glue = compress(m, sr, { ratio: 1.4 + 1.6 * s.mixGlue, attack: 30, release: glueRelease ? Math.max(120, glueRelease) : 220, knee: 10, rmsMs: 15, thresholdPct: 0.7, thresholdOffset: -5 * s.mixGlue, adaptive: true });
         if (!quiet) log.push(`Mix-bus glue ${glue.ratio.toFixed(2)}:1, average ${glue.avgGr.toFixed(1)} dB.`);
       }
@@ -773,7 +834,7 @@ export class MixSession {
         sections,
         tempo,
         alternates: alternates ? alternates.map(({ chs, ...a }) => a) : null,
-        rough: this.rough ? { lufs: this.rough.lufs, seconds: this.rough.seconds, fit: rough ? { errDb: rough.errDb, lagSec: rough.lagSec, rejected: !!rough.rejected, gains: rough.gains || null } : null, tone: roughTone } : null,
+        rough: this.rough ? { lufs: this.rough.lufs, seconds: this.rough.seconds, fit: rough ? { errDb: rough.errDb, lagSec: rough.lagSec, rejected: !!rough.rejected, gains: rough.gains || null, stems: this.stemFit?.stems || null, share: this.stemFit?.share ?? null, stemsUnread: !!this.stemsUnread } : null, tone: roughTone } : null,
         spatial: spatial ? { layout: spatial.layout, lufs: spatial.lufs, dbtp: spatial.dbtp, maxGr: spatial.maxGr, levels: spatial.levels } : null,
       },
     };
