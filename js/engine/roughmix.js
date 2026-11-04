@@ -5,14 +5,18 @@
 // your rough mix, which the processed buses are then set to. The rough mix's
 // long-term spectrum is kept for a gentle tonal match on the mix bus.
 //
-// With two or more stems, each stem's own level is read from the waveforms
-// first (see fitStemLevels). That also sets the buses, and the energy fit stays
-// as the check on whether the file belongs to these stems at all.
+// With two or more stems, each stem's own level is read first (see
+// readStemLevels). That also sets the buses, and the energy fit stays as the
+// check on whether the file belongs to these stems at all.
 
 import { fft, nextPow2 } from './fft.js';
 import { lr4Split3 } from './filters.js';
 import { ltas } from './spectral.js';
 import { integratedLufs, hopEnergies, integratedFromHops } from './loudness.js';
+
+const ROUGH_MAX_ERR_DB = 4; // a rough mix further from the stems than this is the wrong file
+/** Whether a rough mix belongs to these stems. Stems found in it settle that, however much it was processed. */
+export const roughBelongs = (fit, stemsRead) => !!fit && (!!stemsRead || fit.errDb <= ROUGH_MAX_ERR_DB);
 
 const HOP = 0.01;   // seconds per envelope hop
 const FRAME = 40;   // hops per fitting frame (0.4 s)
@@ -53,7 +57,7 @@ export function addFeatures(acc, f) {
 
 export function roughFeatures(chs, sr) {
   const st = chs.length > 1 ? chs.slice(0, 2) : [chs[0], chs[0]];
-  return { ...bandEnergies(st, sr), spec: ltas(st, sr), lufs: integratedLufs(st, sr), sr, seconds: st[0].length / sr };
+  return { ...bandEnergies(st, sr), k: hopEnergies(st, sr), spec: ltas(st, sr), lufs: integratedLufs(st, sr), sr, seconds: st[0].length / sr };
 }
 
 /**
@@ -364,5 +368,151 @@ export function fitStemLevels(stems, rough, rate) {
     }
   }
   const db = Array.from(level, (v, i) => (put[i].some((p) => p > 0) ? v : null));
-  return { db, toneDb: Array.from(tone), share: total > 0 ? found / total : 0, offsetSec: lag / rate, peak };
+  return { db, toneDb: Array.from(tone), share: total > 0 ? found / total : 0, offsetSec: lag / rate, lag, peak };
+}
+
+// --- Each stem's level, from how its energy moves over time ---
+// The waveforms only count sound that lines up sample for sample. Stems rendered
+// on their own from a finished song mostly do not, so read that way they come out
+// far too low. Their energy still rises and falls with the song, band by band,
+// whatever happened to the phase. The levels here are the ones that make the
+// stems' summed energy move most like the song's, with one tone offset per band
+// taken out so EQ on the master is not mistaken for balance.
+
+const FRAME_SEC = 0.085, MAP_HOP_SEC = 0.1, MAP_FRAMES = 1200;
+/** Third-octave centres of a stem map. */
+export const MAP_BANDS = Array.from({ length: 27 }, (_, k) => 40 * Math.pow(2, k / 3));
+const MAP_EDGE = Math.pow(2, 1 / 6);
+const MB = MAP_BANDS.length;
+export const mapHop = (samples, sr) => Math.max(MAP_HOP_SEC, samples / sr / MAP_FRAMES);
+
+/** Energy of one stem per third octave and moment. Flat array: band + frame * bands. */
+export function stemMap(chs, sr, hopSec = MAP_HOP_SEC) {
+  const N = nextPow2(FRAME_SEC * sr), hop = Math.round(hopSec * sr);
+  const frames = Math.max(1, Math.floor((chs[0].length - N) / hop) + 1);
+  const hann = Float64Array.from({ length: N }, (_, i) => 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / N));
+  const edges = MAP_BANDS.map((f) => [Math.round((f / MAP_EDGE) * N / sr), Math.min(N / 2, Math.round((f * MAP_EDGE * N) / sr))]);
+  const energy = new Float32Array(MB * frames), re = new Float64Array(N), im = new Float64Array(N);
+  for (const c of chs) {
+    for (let h = 0; h < frames; h++) {
+      let any = 0;
+      for (let j = 0; j < N; j++) { const v = (c[h * hop + j] || 0) * hann[j]; re[j] = v; im[j] = 0; any += v * v; }
+      if (any < 1e-12) continue;
+      fft(re, im);
+      for (let b = 0; b < MB; b++) {
+        let e = 0;
+        for (let k = edges[b][0]; k < edges[b][1]; k++) e += re[k] * re[k] + im[k] * im[k];
+        energy[b + h * MB] += e;
+      }
+    }
+  }
+  return { energy, frames };
+}
+
+const READ_LOW = 60, READ_HIGH = 5000; // Hz of the light copies that are read
+const READ_MOVE = 60;   // dB a level may go either way: a stem left out of the song sinks this far
+const READ_STEPS = [3, 1, 0.25];
+
+function energyLevels(stems, rough, rate, lag) {
+  const start = Math.max(0, -lag);
+  const usable = Math.min(stems[0][0].length - start, rough[0].length - start - lag);
+  const hopSec = mapHop(usable, rate);
+  const cut = (chs, from) => chs.map((c) => c.subarray(from, from + usable));
+  const maps = stems.map((s) => stemMap(cut(s, start), rate, hopSec));
+  const song = stemMap(cut(rough, start + lag), rate, hopSec);
+  const F = song.frames, m = stems.length;
+  const top = Math.min(READ_HIGH, 0.42 * rate);
+  const bands = MAP_BANDS.flatMap((f, b) => (f >= READ_LOW && f <= top ? [b] : []));
+  const toDb = (v) => 10 * Math.log10(v);
+  const songDb = new Float32Array(bands.length * F).fill(NaN), floors = new Float64Array(bands.length), kept = bands.map(() => 0);
+  bands.forEach((b, x) => {
+    let mean = 0;
+    for (let h = 0; h < F; h++) mean += song.energy[b + h * MB];
+    mean /= F;
+    floors[x] = mean;
+    if (mean <= 0) return;
+    for (let h = 0; h < F; h++) {
+      const e = song.energy[b + h * MB];
+      if (e < 1e-5 * mean) continue;
+      songDb[x * F + h] = toDb(e + 1e-3 * mean);
+      kept[x]++;
+    }
+  });
+  const live = maps.map((map) => map.energy.some((v) => v > 0));
+  const sums = new Float64Array(bands.length * F);
+  bands.forEach((b, x) => { for (let h = 0; h < F; h++) for (let i = 0; i < m; i++) if (live[i]) sums[x * F + h] += maps[i].energy[b + h * MB]; });
+  // Spread of the difference over time, per band: its mean is that band's tone offset.
+  const cost = (i, change) => {
+    const E = i >= 0 ? maps[i].energy : null;
+    let total = 0, count = 0;
+    bands.forEach((b, x) => {
+      if (!kept[x]) return;
+      let mean = 0;
+      for (let h = 0; h < F; h++) mean += sums[x * F + h] + (E ? change * E[b + h * MB] : 0);
+      mean /= F;
+      if (mean <= 0) return;
+      const c = 1e-3 * mean;
+      let a = 0, a2 = 0;
+      for (let h = 0; h < F; h++) {
+        const t = songDb[x * F + h];
+        if (t !== t) continue;
+        const d = toDb(sums[x * F + h] + (E ? change * E[b + h * MB] : 0) + c) - t;
+        a += d;
+        a2 += d * d;
+      }
+      total += a2 - (a * a) / kept[x];
+      count += kept[x];
+    });
+    return count ? total / count : Infinity;
+  };
+  const db = new Float64Array(m), lin = new Float64Array(m).fill(1);
+  let best = cost(-1, 0);
+  for (const step of READ_STEPS) {
+    for (let round = 0; round < 12; round++) {
+      let moved = false;
+      for (let i = 0; i < m; i++) {
+        if (!live[i]) continue;
+        for (const s of [step, -step]) {
+          for (;;) {
+            const next = db[i] + s;
+            if (Math.abs(next) > READ_MOVE) break;
+            const change = Math.pow(10, next / 10) - lin[i];
+            const c = cost(i, change);
+            if (c >= best - 1e-5) break;
+            bands.forEach((b, x) => { for (let h = 0; h < F; h++) sums[x * F + h] += change * maps[i].energy[b + h * MB]; });
+            lin[i] += change;
+            db[i] = next;
+            best = c;
+            moved = true;
+          }
+        }
+      }
+      if (!moved) break;
+    }
+  }
+  return { db: Array.from(db, (v, i) => (live[i] ? v : null)), leftover: Math.sqrt(best) };
+}
+
+const READ_EXACT = 0.9;  // the waveforms account for this much of it: they line up, so they are exact
+const READ_FITS = 3.5;   // dB left unexplained by the energy fit. All of a song's stems leave up to
+                         // 2.7; part of them leave 4.8 or more, as the song holds what is missing.
+const READ_CLOSE = 1.5;  // dB between readings the energy can't tell apart, so nothing moves
+
+/**
+ * Each stem's level in your rough mix, from the light copies, by whichever
+ * reading suits this file. A plain bounce of these stems lines up sample for
+ * sample and the waveforms are exact. A finished song's stems do not line up, and
+ * the energy is right. When the stems are only part of the song, the energy has
+ * no way to account for the rest, and the waveforms ignore what lines up with no
+ * stem. Returns null when the two do not line up in time at all.
+ */
+export function readStemLevels(stems, rough, rate) {
+  const wave = fitStemLevels(stems, rough, rate);
+  if (!wave) return null;
+  if (wave.share >= READ_EXACT) return { ...wave, method: 'waveform' };
+  const energy = energyLevels(stems, rough, rate, wave.lag);
+  if (energy.leftover > READ_FITS) return { ...wave, method: 'waveform', partial: true };
+  const found = energy.db.filter((v) => v != null);
+  const close = Math.max(...found) - Math.min(...found) <= READ_CLOSE;
+  return { ...wave, db: close ? energy.db.map((v) => (v == null ? null : 0)) : energy.db, share: null, method: 'energy', leftover: energy.leftover };
 }

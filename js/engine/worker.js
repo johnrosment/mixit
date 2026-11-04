@@ -69,15 +69,20 @@ self.onmessage = (ev) => {
       const audio = toAudio(payload);
       self.postMessage({ id, type: 'result', data: measureStem(audio.channels, audio.sr, { noise: !!payload.noise }) });
     } else if (type === 'autoBegin') {
-      auto = new AutoSession(payload.sr, payload.length);
+      auto = new AutoSession(payload.sr, payload.length, { rough: !!payload.rough, stems: payload.stems });
       self.postMessage({ id, type: 'result', data: { ok: true } });
     } else if (type === 'autoStem') {
       const audio = toAudio(payload);
       if (audio.sr !== auto.sr) throw new Error(`Stem sample rate ${audio.sr} does not match the session (${auto.sr}).`);
       auto.addStem(audio);
       self.postMessage({ id, type: 'result', data: { ok: true } });
+    } else if (type === 'autoRough') {
+      const audio = toAudio(payload);
+      if (audio.sr !== auto.sr) throw new Error(`Rough mix sample rate ${audio.sr} does not match the session (${auto.sr}).`);
+      auto.setRough(audio);
+      self.postMessage({ id, type: 'result', data: { ok: true } });
     } else if (type === 'autoPlan') {
-      const plan = auto.plan(payload.rows, { rough: payload.rough });
+      const plan = auto.plan(payload.rows);
       auto = null;
       self.postMessage({ id, type: 'result', data: plan });
     } else if (type === 'decode') {

@@ -2,8 +2,8 @@
 // and summed into category buses; bus-level processing, ducking, the vocal
 // rider, effects returns and the mix bus run in finish().
 
-import { integratedLufs, hopEnergies, truePeak, lin2db } from './loudness.js';
-import { compress, deess, transientShape, detectorDb, percentileDb } from './dynamics.js';
+import { integratedLufs, integratedFromHops, loudnessRangeFromHops, hopEnergies, truePeak, lin2db } from './loudness.js';
+import { compress, deess, transientShape, detectorDb, percentileDb, shapeMoves, applyShape } from './dynamics.js';
 import { toneEq, width, pan, gain, reverb, delay, addInto, saturate, chorus } from './effects.js';
 import { design, cascade, lr4Split2, lr4Split3, zeroPhaseLowpass } from './filters.js';
 import { analyze } from './analyze.js';
@@ -12,7 +12,7 @@ import { finalize } from './master.js';
 import { bedFromBuses, loudnessWeights, channelLevels } from './spatial.js';
 import { tuneVocal, SCALES } from './pitch.js';
 import { detectSections, sectionMoves, sectionCurve } from './sections.js';
-import { roughFeatures, stemFeatures, addFeatures, fitBalance, waveStep, waveCopy, fitStemLevels } from './roughmix.js';
+import { roughFeatures, stemFeatures, addFeatures, fitBalance, roughBelongs, waveStep, waveCopy, readStemLevels } from './roughmix.js';
 import { lowCutFreq, resonantCuts, buildUpCuts } from './stemtools.js';
 import { levelSpeech, duckUnderSpeech, deliveryCheck, fadeEdits, mouthDeclick, rotatePhase, shareMics, dialogueLoudness, FRAME_RATES, DELIVERY } from './post.js';
 import { denoise, detectClicks, repairClicks, detectHumInPauses, removeHum } from './repair.js';
@@ -26,8 +26,9 @@ const BUS_TARGETS = { vocals: -18, drums: -20, bass: -21, music: -19.5, fx: -27,
 const POST_TARGETS = { vocals: -20, drums: -27, bass: -27, music: -25, fx: -26, ambience: -32 };
 const VOICE_LUFS = -24; // each voice is brought to this before the bus, so speakers match
 const SUPPORT_OFFSET = -6; // doubles/backing relative to lead vocal
-const ROUGH_MAX_ERR_DB = 4; // a rough mix further from the stems than this is the wrong file
 const ROUGH_MAX_DB = 4; // the most its tone can move the finished mix
+const KEEP_TONE = 0.7; // how much of the tone the processing added Auto mix takes back
+const KEEP_TONE_DB = 3; // the most that can be, before the strength
 const ROUGH_LEFT_OUT_DB = -24; // a stem barely found in it stays this far under the loudest
 // Video, ad and podcast stems that get click removal and edit fades.
 const EDIT_KINDS = { vocals: 'dialogue', fx: 'effects', ambience: 'ambience' };
@@ -154,7 +155,7 @@ export class MixSession {
   /** Each stem's level from your rough mix, once all are read. Every level then stays relative within its bus. */
   fitRoughStems() {
     const read = this.stemsToRead;
-    const fit = fitStemLevels(read.map((i) => this.stemWaves[i]), this.roughWave, this.sr / this.waveStep);
+    const fit = readStemLevels(read.map((i) => this.stemWaves[i]), this.roughWave, this.sr / this.waveStep);
     this.stemWaves = this.roughWave = null;
     this.stemsUnread = !fit;
     if (!fit) return { read: false };
@@ -173,8 +174,8 @@ export class MixSession {
     // A voice that gets matched to the others afterwards does not keep this level, so it is not listed.
     const matched = (st) => this.s.mode === 'post' && st.category === 'vocals' && this.s.matchVoices !== false;
     const stems = levels.filter(({ i, db }) => db != null && !matched(this.s.stems[i])).map(({ i, db }) => ({ name: this.s.stems[i].name, db: db - top }));
-    this.stemFit = { busDb, offsetSec: fit.offsetSec, share: fit.share, stems };
-    return { read: true, stems, share: fit.share };
+    this.stemFit = { busDb, offsetSec: fit.offsetSec, share: fit.share, method: fit.method, partial: !!fit.partial, stems };
+    return { read: true, stems, share: fit.share, method: fit.method };
   }
 
   addStem(index, audio) {
@@ -241,6 +242,18 @@ export class MixSession {
     if (fromRough) row.steps.push(`Level from your rough mix: ${fmt(fromRough)} dB`);
     // Unprocessed levels per bus for matching your rough mix (after your stem gain).
     if (this.rough && audible) { const k = roughBusOf(st); this.roughBus[k] = addFeatures(this.roughBus[k], stemFeatures(chs, sr)); }
+    // Auto mix keeps each bus at the level it comes in at, plan's moves included.
+    if (this.s.autoHold && audible) {
+      const k = roughBusOf(st), h = hopEnergies(chs, sr);
+      this.holdBus ||= {};
+      if (this.holdBus[k]) h.energy.forEach((e, j) => { this.holdBus[k].energy[j] += e; });
+      else this.holdBus[k] = { energy: Float64Array.from(h.energy), hop: h.hop };
+      // (With the plan's cuts in, so holding the tone does not take them back out.)
+      this.heldSum ||= stereoBuf(n);
+      const cuts = st.autoCuts?.length ? chs.map((c) => new Float32Array(c)) : chs;
+      if (cuts !== chs) toneEq(cuts, sr, { extra: st.autoCuts });
+      addInto(this.heldSum, cuts, 1);
+    }
     // High-pass everything but kick and bass: raised to just under where the
     // stem's useful low end starts (at most the cap for its type).
     let hpf = st.hpf || 0;
@@ -343,16 +356,15 @@ export class MixSession {
     }
 
     // --- Does your rough mix belong to these stems? A wrong file steers nothing. ---
-    // (Stems found in it sample for sample settle that, however much it was processed.)
     const roughFit = this.rough ? fitBalance(Object.fromEntries(BUS_KEYS.filter((k) => this.roughBus[k]).map((k) => [k, this.roughBus[k]])), this.rough, this.stemFit) : null;
-    const roughOk = !!roughFit && (!!this.stemFit || roughFit.errDb <= ROUGH_MAX_ERR_DB);
+    const roughOk = roughBelongs(roughFit, this.stemFit);
 
     // --- Vocal lead / support balance ---
     progress('Balancing vocals', 0.05);
     const leadLufs = this.used.vocalLead ? integratedLufs(B.vocalLead, sr) : null;
     const supportLufs = this.used.vocalSupport ? integratedLufs(B.vocalSupport, sr) : null;
     // (With your rough mix, its own lead/backing balance is kept instead.)
-    if (balance && !roughOk && leadLufs != null && supportLufs != null && supportLufs > -70) {
+    if (balance && !roughOk && !s.autoHold && leadLufs != null && supportLufs != null && supportLufs > -70) {
       const g = leadLufs + SUPPORT_OFFSET - supportLufs;
       gain(B.vocalSupport, g);
       log.push(`Doubles/backing balanced ${fmt(SUPPORT_OFFSET)} LU under the lead (${fmt(g)} dB).`);
@@ -382,6 +394,7 @@ export class MixSession {
     const before = Object.fromEntries(keys.map((k) => [k, integratedLufs(buses[k], sr)]));
     const targets = post ? POST_TARGETS : BUS_TARGETS;
     const even = (k) => Math.max(-40, Math.min(40, targets[k] - before[k]));
+    const tot = (f) => 10 * Math.log10(keys.reduce((a, k) => a + Math.pow(10, f(k) / 10), 0));
     let rough = null;
     if (this.rough && !roughOk) {
       rough = { ...(roughFit || {}), rejected: true };
@@ -393,21 +406,33 @@ export class MixSession {
       // shifted together so the sum lands where the even balance would. A bus
       // you left out of the rough mix stays 24 dB under its even level.
       const target = (k) => (Number.isFinite(fit.lufs[k]) ? fit.lufs[k] - before[k] : -Infinity);
-      const tot = (f) => 10 * Math.log10(keys.reduce((a, k) => a + Math.pow(10, f(k) / 10), 0));
       const shift = tot((k) => targets[k]) - tot((k) => before[k] + Math.max(target(k), even(k) - 24));
       rough = { ...fit, gains: Object.fromEntries(keys.map((k) => [k, Math.max(-40, Math.min(40, Math.max(target(k) + shift, even(k) - 24)))])) };
       log.push(`Balance from your rough mix (lined up${Math.abs(fit.lagSec) >= 0.02 ? ` with a ${fit.lagSec.toFixed(2)} s offset` : ''}, fits within ${fit.errDb.toFixed(1)} dB): ${keys.map((k) => `${k} ${fmt(rough.gains[k])} dB`).join(', ')}.`);
-      if (this.stemFit) log.push(`Each stem's level read from it: ${this.stemFit.stems.map((x) => `${x.name} ${fmt(x.db)} dB`).join(', ')}. The stems account for ${Math.round(this.stemFit.share * 100)}% of its sound.`);
+      if (this.stemFit) log.push(`Each stem's level read from it: ${this.stemFit.stems.map((x) => `${x.name} ${fmt(x.db)} dB`).join(', ')}.${this.stemFit.method === 'energy' ? ' Read from how each stem rises and falls with it.' : ` The stems line up with ${Math.round(this.stemFit.share * 100)}% of its sound.`}`);
       else if (this.stemsUnread) log.push('Your rough mix does not match these stems sample for sample, so each bus follows it as a whole and the stems within a bus keep their own balance.');
     }
+    // Auto mix has already judged the balance from the stems played together, so
+    // each bus goes back to the level it came in at, with the plan's moves, and
+    // its own compression cannot pull it out of place.
+    const roughSet = !!rough && !rough.rejected;
+    let held = null;
+    if (balance && s.autoHold && !roughSet && this.holdBus) {
+      const want = (k) => (this.holdBus[k] ? integratedFromHops(this.holdBus[k]) - before[k] : 0);
+      const shift = tot((k) => targets[k]) - tot((k) => before[k] + want(k));
+      held = Object.fromEntries(keys.map((k) => [k, Math.max(-40, Math.min(40, want(k) + shift))]));
+      log.push(`Each group stays at the level it came in at, plus Auto mix’s moves: ${keys.map((k) => `${k} ${fmt(held[k])} dB`).join(', ')}.`);
+    }
     const amount = s.balanceAmount ?? 1;
+    const setLufs = {};
     for (const key of keys) {
       const userGain = (s.buses[key]?.gain || 0) + (key === 'vocals' ? s.vocalLevel || 0 : 0);
-      const auto = !balance || before[key] <= -70 ? 0 : rough && !rough.rejected ? rough.gains[key] : amount * even(key);
+      const auto = !balance || before[key] <= -70 ? 0 : roughSet ? rough.gains[key] : held ? held[key] : amount * even(key);
       gain(buses[key], auto + userGain);
+      setLufs[key] = before[key] + auto + userGain;
       busReports[key] = { inputLufs: before[key], autoGainDb: auto, userGainDb: userGain };
     }
-    if (balance && !(rough && !rough.rejected)) log.push(`Source-aware balance${amount < 0.99 ? ` (${Math.round(amount * 100)}% of the way to an even balance)` : ''}: ${keys.map((k) => `${k} ${fmt(busReports[k].autoGainDb)} dB`).join(', ')}.`);
+    if (balance && !roughSet && !held) log.push(`Source-aware balance${amount < 0.99 ? ` (${Math.round(amount * 100)}% of the way to an even balance)` : ''}: ${keys.map((k) => `${k} ${fmt(busReports[k].autoGainDb)} dB`).join(', ')}.`);
 
     // --- Tempo: echo time and compressor release follow the song ---
     let tempo = 0;
@@ -543,6 +568,15 @@ export class MixSession {
       log.push(`Bass ducks up to ${s.bassDuck} dB on kick hits; active ${bassDuck.activePct.toFixed(0)}% of the time.`);
     }
 
+    // A balance you or Auto mix set stays set: the bus stages above may not move it.
+    // (Music and drums keep the dip they take under a vocal, which is the point of it.)
+    if (balance && (roughSet || held)) {
+      for (const key of keys) {
+        if (before[key] <= -70 || (used.vocals && !post && (key === 'music' || key === 'drums'))) continue;
+        gain(buses[key], Math.max(-6, Math.min(6, setLufs[key] - integratedLufs(buses[key], sr))));
+      }
+    }
+
     // --- Section automation (after the rider, so it does not undo the moves) ---
     let sections = null, sendCurve = null;
     const edited = Array.isArray(s.sections) && s.sections.length ? s.sections : null;
@@ -672,7 +706,15 @@ export class MixSession {
     // --- Mix bus (kept light: the mix should already work before it) ---
     progress('Mix bus', 0.7);
     const lows = s.mixLow || 0, highs = s.mixHigh || 0, tape = s.mixTape || 0;
-    let roughCurve = null;
+    let roughCurve = null, shape = null;
+    // Auto mix judged the tone from the stems as they came, so the stages since then may not shift it.
+    // Measured before the mix-bus tone below, so the Lows and Highs sliders stay on top.
+    let keepTone = null;
+    if (held && this.heldSum) {
+      keepTone = referenceCurve(ltas(mix, sr), ltas(this.heldSum, sr), { strength: KEEP_TONE, maxDb: KEEP_TONE_DB, fraction: 2 });
+      log.push('The overall tone is held close to your stems’, so the processing does not brighten or dull them.');
+    }
+    this.heldSum = null;
     const busChain = (m, quiet = false) => {
       if (lows || highs || tape > 0.01) {
         toneEq(m, sr, { low: lows, lowFreq: 120, high: highs - 1.5 * tape, highFreq: 8000 });
@@ -684,7 +726,9 @@ export class MixSession {
         glue = compress(m, sr, { ratio: 1.4 + 1.6 * s.mixGlue, attack: 30, release: glueRelease ? Math.max(120, glueRelease) : 220, knee: 10, rmsMs: 15, thresholdPct: 0.7, thresholdOffset: -5 * s.mixGlue, adaptive: true });
         if (!quiet) log.push(`Mix-bus glue ${glue.ratio.toFixed(2)}:1, average ${glue.avgGr.toFixed(1)} dB.`);
       }
+      if (keepTone) { const res = spectralProcess(m, sr, { staticCurve: keepTone }); m[0] = res.chs[0]; m[1] = res.chs[1]; }
       if (roughCurve) { const res = spectralProcess(m, sr, { staticCurve: roughCurve }); m[0] = res.chs[0]; m[1] = res.chs[1]; }
+      if (shape) applyShape(m, shape);
       return glue;
     };
     const mixGlue = busChain(mix);
@@ -703,6 +747,25 @@ export class MixSession {
       roughTone = { strength: s.roughTone, curve: pts };
       const big = [...pts].sort((a, b) => Math.abs(b.db) - Math.abs(a.db)).slice(0, 3);
       log.push(`Tone moved toward your rough mix at ${Math.round(s.roughTone * 100)}% strength (${(ROUGH_MAX_DB * s.roughTone).toFixed(1)} dB at most). Largest moves: ${big.map((p) => `${fmt(p.db)} dB at ${p.freq} Hz`).join(', ')}.`);
+    }
+
+    // --- The song's rise and fall (compressors level out loud and quiet sections, not only hits) ---
+    let heldRange = null;
+    if (s.autoHold && (roughSet || held)) {
+      progress('Keeping the song’s rise and fall', 0.76);
+      let stemsEnergy = null, hop = 0;
+      for (const bus of Object.values(this.holdBus || {})) { stemsEnergy ||= new Float64Array(bus.energy.length); hop = bus.hop; bus.energy.forEach((e, j) => { stemsEnergy[j] += e; }); }
+      if (stemsEnergy) heldRange = loudnessRangeFromHops({ energy: stemsEnergy, hop });
+      let target = stemsEnergy;
+      if (roughSet) {
+        const lag = Math.round((rough.lagSec || 0) / this.rough.k.hopSec), from = this.rough.k.energy;
+        target = Float64Array.from({ length: Math.ceil(n / this.rough.k.hop) }, (_, j) => from[j + lag] || 0);
+      }
+      shape = target && shapeMoves(mix, sr, target);
+      if (shape) {
+        applyShape(mix, shape);
+        log.push(`Loud and quiet sections moved back toward ${roughSet ? 'your rough mix' : 'your stems'}, up to ${shape.maxDb.toFixed(1)} dB, so the song keeps its rise and fall.`);
+      }
     }
 
     // --- Output stage ---
@@ -817,6 +880,7 @@ export class MixSession {
       report: {
         settings: s,
         sampleRate: sr,
+        heldRange,
         rawSumLufs,
         rawSumTruePeak,
         stems: this.stemReports,

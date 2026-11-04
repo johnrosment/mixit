@@ -15,7 +15,7 @@ account to make and nothing to install.
 1. **[Open MIXIT](https://mixit-opal.vercel.app)** and choose **Mix**, **Master** or **Analyze**.
 2. **Drop your files.** WAV, AIFF, FLAC, MP3 and M4A all work.
 3. **Shape the sound** with eight simple sliders in **Easy**, or switch to **Advanced** for every setting.
-   **Auto mix** scores your stems played together against goals from finished records, makes the moves that meet them, and shows the score. **Auto master** measures the song and sets the sliders. **Default everything** puts them back to the middle or off.
+   **Auto mix** scores your stems played together against goals from finished songs, starts from the balance they came in at, makes only the moves that meet those goals, and shows the score. **Auto master** measures the song and sets the sliders. **Default everything** puts them back to the middle or off.
 4. **Compare** before and after at the same volume, then **Download all** as one ZIP or save each file on its own.
    The MP3 is 320 kbps, or a little lower for long songs so it stays under 10 MB for easy sharing.
 

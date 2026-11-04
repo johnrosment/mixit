@@ -40,8 +40,7 @@ export function measureStem(chs, sr, { noise = false } = {}) {
   };
 }
 
-// The balance Easy will set (see BUS_TARGETS in mix.js), to judge stems as they will sit together.
-const TARGETS = { vocals: -18, drums: -20, bass: -21, music: -19.5, fx: -27, ambience: -30 };
+// The balance a video mix will set (see POST_TARGETS in mix.js), to judge stems as they will sit together.
 const POST_TARGETS = { vocals: -20, drums: -27, bass: -27, music: -25, fx: -26, ambience: -32 };
 const BALANCE = 0.75;
 function balancedBands(rows, targets) {
@@ -51,6 +50,16 @@ function balancedBands(rows, targets) {
   for (const r of rows) {
     const bus = db(lufs[r.category] || 0);
     const g = bus > -70 ? Math.pow(10, (BALANCE * ((targets[r.category] ?? -24) - bus)) / 10) : 1;
+    const o = (out[r.category] ||= {});
+    for (const [k, p] of Object.entries(r.m.bands)) o[k] = (o[k] || 0) + p * g;
+  }
+  return out;
+}
+// A song stays at the balance it came in at, with the plan's moves.
+function heldBands(rows) {
+  const out = {};
+  for (const r of rows) {
+    const g = Math.pow(10, (r.gainDb || 0) / 10);
     const o = (out[r.category] ||= {});
     for (const [k, p] of Object.entries(r.m.bands)) o[k] = (o[k] || 0) + p * g;
   }
@@ -72,15 +81,18 @@ function clarityFor(lead, reasons, word) {
   return 0;
 }
 
-/** Sliders for a song. rows: [{ category, role, m }]. With a rough mix, its balance and tone stand. */
-export function autoMixSliders(rows, { rough = false } = {}) {
+/**
+ * Sliders for a song. rows: [{ category, role, m, gainDb }], gainDb being what the plan moved.
+ * With a rough mix, its balance and tone stand. The song's overall tone is the plan's to judge.
+ */
+export function autoMixSliders(rows, { rough = false, moved = false } = {}) {
   const live = rows.filter((r) => r.m.lufs > -70);
   const has = (c) => live.some((r) => r.category === c);
   const reasons = [];
   const e = { vocal: 0, clarity: 0, lows: 0, highs: 0, punch: 0.5, verb: 0.4, echo: 0, tape: 0 };
   const lead = leadOf(live);
   const others = ['drums', 'bass', 'music', 'fx'];
-  const by = balancedBands(live, TARGETS);
+  const by = heldBands(live);
 
   if (lead) {
     if (!rough && others.some(has)) {
@@ -90,18 +102,12 @@ export function autoMixSliders(rows, { rough = false } = {}) {
     }
     e.clarity = clarityFor(lead, reasons, 'voice');
   }
-  // Tone only moves where something carries it: a piece of held pads is meant to sound that way.
-  if (!rough && (has('drums') || has('vocals'))) {
+  // Lows only move where something carries them: a piece of held pads is meant to sound that way.
+  if (!rough && (has('drums') || has('vocals')) && (has('drums') || has('bass'))) {
     const keys = Object.keys(by);
-    const all = sumBands(by, keys, 'all');
-    const lows = db(sumBands(by, keys, 'lows')) - db(all);
-    const air = db(sumBands(by, keys, 'air')) - db(all);
-    if (has('drums') || has('bass')) {
-      if (lows < -18) { e.lows = 0.2; reasons.push('The low end is light, so the lows come up a little.'); }
-      else if (lows > -3) { e.lows = -0.2; reasons.push('The low end is heavy, so the lows come down a little.'); }
-    }
-    if (air < -38) { e.highs = 0.25; reasons.push('The top end is dull, so the highs come up a little.'); }
-    else if (air > -14) { e.highs = -0.25; reasons.push('The top end is sharp, so the highs come down a little.'); }
+    const lows = db(sumBands(by, keys, 'lows')) - db(sumBands(by, keys, 'all'));
+    if (lows < -18) { e.lows = 0.2; reasons.push('The low end is light, so the lows come up a little.'); }
+    else if (lows > -3) { e.lows = -0.2; reasons.push('The low end is heavy, so the lows come down a little.'); }
   }
   if (has('drums')) {
     const drums = loudestFirst(live.filter((r) => r.category === 'drums'))[0];
@@ -117,7 +123,7 @@ export function autoMixSliders(rows, { rough = false } = {}) {
     else e.verb = 0.25;
   }
   if (rough) reasons.push('Your rough mix sets the balance and tone.');
-  else if (rows.length > 1 && rows.every((r) => r.m.lufs + r.m.crest > -1)) reasons.push('Every stem peaks right at the top, so they were probably levelled one by one and their balance may be off. If you have the finished song, add it as your rough mix and MIXIT will copy each stem’s level.');
+  else if (moved && rows.length > 1 && rows.every((r) => r.m.lufs + r.m.crest > -1)) reasons.push('Every stem peaks right at the top, so they were probably levelled one by one, which may be why some had to move. If you have the finished song, add it as your rough mix and MIXIT will read each stem’s level from it.');
   if (!has('vocals') && !has('drums')) reasons.push('No drums or vocals to make room for, so clean-up and glue stay off.');
   if (!reasons.length) reasons.push('Everything measures well, so the sliders stay at their usual places.');
   return { sliders: e, reasons };

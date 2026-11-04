@@ -108,6 +108,7 @@ html[data-project="song"] .only-post, html[data-project="post"] .only-song { dis
 .check-list .mark { font-weight: 700; min-width: 54px; }
 .check-list .mark.pass { color: var(--teal-deep); }
 .check-list .mark.check { color: var(--red-deep); }
+.check-list .mark.note { color: var(--muted); }
 
 /* ---------- Layout ---------- */
 main { padding: 28px 24px 64px; max-width: 1480px; margin: 0 auto; }

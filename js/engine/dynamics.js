@@ -641,3 +641,70 @@ export function dynamicShelf(chs, sr, { freq = 8000, gainDb = 0, staticPart = 0.
   const step = Math.max(1, Math.round(sr * curveStepSec));
   return { freq, gainDb, avgDb: sumBoost / n, minDb: 20 * Math.log10(1 + full * staticPart), curve: decimateMin(curve, step).map((v) => v), curveStepSec };
 }
+
+// --- A song's rise and fall ---
+const SHAPE_WINDOW = 15;  // hops either side of a slow level (3 s in all, as loudness range is read)
+const SHAPE_SMOOTH = 5;   // hops either side when smoothing the moves
+const SHAPE_SPAN = 30;    // dB under the loudest moment that still counts as playing
+const SHAPE_MAX = 6;      // dB any moment may move
+
+function slowDb(energy, w) {
+  const H = energy.length, sum = new Float64Array(H + 1), out = new Float64Array(H);
+  for (let j = 0; j < H; j++) sum[j + 1] = sum[j] + energy[j];
+  for (let j = 0; j < H; j++) {
+    const a = Math.max(0, j - w), z = Math.min(H, j + w + 1);
+    const v = (sum[z] - sum[a]) / (z - a);
+    out[j] = v > 0 ? 10 * Math.log10(v) : -Infinity;
+  }
+  return out;
+}
+
+/**
+ * The slow gain that makes a mix rise and fall like `target` (hop energies).
+ * Only sections move: every window is centred and 3 s long, so the hits and the
+ * density the compressors gave stay as they are. Null when nothing would move.
+ */
+export function shapeMoves(chs, sr, target) {
+  const { energy, hop } = hopEnergies(chs, sr);
+  const H = energy.length;
+  if (H < 2 * SHAPE_WINDOW) return null;
+  const want = slowDb(Float64Array.from({ length: H }, (_, j) => target[j] || 0), SHAPE_WINDOW), now = slowDb(energy, SHAPE_WINDOW);
+  let loudest = -Infinity;
+  for (const v of want) if (v > loudest) loudest = v;
+  const raw = new Float64Array(H), on = new Uint8Array(H);
+  let mean = 0, count = 0;
+  for (let j = 0; j < H; j++) {
+    if (want[j] < loudest - SHAPE_SPAN || !Number.isFinite(now[j])) continue;
+    on[j] = 1;
+    raw[j] = want[j] - now[j];
+    mean += raw[j];
+    count++;
+  }
+  if (!count) return null;
+  mean /= count;
+  // Silence and fades hold the nearest move, so nothing jumps at their edges.
+  let last = null;
+  for (let j = 0; j < H; j++) { if (on[j]) last = raw[j] - mean; raw[j] = last ?? NaN; }
+  last = null;
+  for (let j = H - 1; j >= 0; j--) { if (Number.isNaN(raw[j])) raw[j] = last ?? 0; else last = raw[j]; }
+  const sum = new Float64Array(H + 1);
+  for (let j = 0; j < H; j++) sum[j + 1] = sum[j] + Math.max(-SHAPE_MAX, Math.min(SHAPE_MAX, raw[j]));
+  const curve = new Float32Array(H);
+  let maxDb = 0;
+  for (let j = 0; j < H; j++) {
+    const a = Math.max(0, j - SHAPE_SMOOTH), z = Math.min(H, j + SHAPE_SMOOTH + 1);
+    curve[j] = (sum[z] - sum[a]) / (z - a);
+    if (Math.abs(curve[j]) > maxDb) maxDb = Math.abs(curve[j]);
+  }
+  return maxDb < 0.05 ? null : { curve, hop, maxDb };
+}
+
+export function applyShape(chs, { curve, hop }) {
+  const n = chs[0].length, H = curve.length;
+  for (let i = 0; i < n; i++) {
+    const pos = i / hop - 0.5;
+    const j0 = Math.max(0, Math.min(H - 1, Math.floor(pos))), j1 = Math.min(H - 1, j0 + 1), t = Math.max(0, Math.min(1, pos - j0));
+    const g = Math.pow(10, (curve[j0] * (1 - t) + curve[j1] * t) / 20);
+    for (const ch of chs) ch[i] *= g;
+  }
+}
