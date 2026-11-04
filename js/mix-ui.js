@@ -1,6 +1,7 @@
 // Mix tab: stem import and routing, style, bus settings, rendering and results.
 
-import { autoMixSliders, autoPostSliders } from './engine/automix.js';
+import { autoPostSliders } from './engine/automix.js';
+import { scoreCard } from './engine/autoplan.js';
 import { el, buildSections, buildEasy, easyWords, chipGroup, toast, wireDrop, setProgress, storage, store } from './controls.js';
 import { probeFile, workerPayload, framesAt, encodeForDownload, download, describeInfo } from './audio-io.js';
 import { encodeWav } from './engine/wav.js';
@@ -447,7 +448,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
   // Back to the stem's starting point. Its bus, mute, solo and polarity are your routing, and stay.
   function resetStem(st, mode = document.documentElement.dataset.mode) {
     const flat = state.style === 'flat' && mode !== 'easy';
-    Object.assign(st, { gain: 0, eqLow: 0, eqMid: 0, eqHigh: 0, hpfAuto: true, panTouched: false, tune: 0, pan: st.category === 'vocals' ? rolePan(st.role) : sidePan(st.name) }, STEM_DEFAULTS[st.category], flat ? { pan: 0, ...FLAT_STEM } : null);
+    Object.assign(st, { gain: 0, eqLow: 0, eqMid: 0, eqHigh: 0, hpfAuto: true, panTouched: false, autoCuts: [], autoNote: '', tune: 0, pan: st.category === 'vocals' ? rolePan(st.role) : sidePan(st.name) }, STEM_DEFAULTS[st.category], flat ? { pan: 0, ...FLAT_STEM } : null);
   }
 
   async function addFiles(all) {
@@ -531,7 +532,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
     };
     const infoText = describeInfo(s.info);
     const main = el('div', { class: 'stem-main' },
-      el('div', { class: 'stem-name' }, el('b', { title: s.name }, s.name), el('small', { class: s.info && !s.info.valid ? 'bad' : '' }, infoText)),
+      el('div', { class: 'stem-name' }, el('b', { title: s.name }, s.name), el('small', { class: s.info && !s.info.valid ? 'bad' : '' }, infoText), s.autoNote ? el('small', { class: 'auto-note' }, `Auto mix: ${s.autoNote}`) : null),
       cat, role,
       el('div', { class: 'msp' }, toggle('m', 'mute', 'M', 'Mute'), toggle('s', 'solo', 'S', 'Solo'), toggle('p', 'polarity', 'Ø', 'Invert polarity')),
       mini('Gain', s.gain, -24, 12, 0.5, (v) => `${v > 0 ? '+' : ''}${v}`, (v) => { s.gain = v; }),
@@ -557,6 +558,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
       mini('High 7k', s.eqHigh, -12, 12, 0.5, (v) => `${v > 0 ? '+' : ''}${v}`, (v) => { s.eqHigh = v; }),
       mini('Width', s.width, 0, 2, 0.05, pct, (v) => { s.width = v; }),
       check('monoBass', 'Mono below 120 Hz'),
+      s.autoCuts?.length ? el('button', { type: 'button', class: 'btn small', onclick: () => { s.autoCuts = []; s.autoNote = s.autoNote.split(', ').filter((x) => !x.includes(' at ')).join(', '); renderStems(); } }, 'Remove Auto mix cut') : null,
       s.category === 'vocals' ? check('deess', 'De-ess') : null,
       s.category === 'vocals' ? mini('Tune', s.tune ?? 0, 0, 1, 0.05, (v) => (v ? pct(v) : 'Off'), (v) => { s.tune = v; }) : null,
       s.category === 'vocals' ? mini('Retune', s.tuneSpeed ?? 40, 0, 200, 5, (v) => (v ? `${v} ms` : 'Hard'), (v) => { s.tuneSpeed = v; }) : null);
@@ -575,7 +577,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
       renderStems();
     });
     return el('div', { class: 'easy-stem', dataset: { cat: s.category } },
-      el('div', { class: 'nm' }, el('b', { title: s.name }, s.name), el('small', { class: s.info && !s.info.valid ? 'bad' : '' }, describeInfo(s.info))),
+      el('div', { class: 'nm' }, el('b', { title: s.name }, s.name), el('small', { class: s.info && !s.info.valid ? 'bad' : '' }, describeInfo(s.info)), s.autoNote ? el('small', { class: 'auto-note' }, `Auto mix: ${s.autoNote}`) : null),
       cat,
       el('button', { class: 'icon-btn', type: 'button', 'aria-label': `Remove ${s.name}`, onclick: () => { state.stems = state.stems.filter((x) => x !== s); renderStems(); } }, '×'));
   }
@@ -605,7 +607,11 @@ export function initMix({ engine, sendToMaster, onMode }) {
   // A job is what one render uses: the Easy sliders, or the Advanced values as they stand.
   function renderJob(mode) {
     if (mode === 'easy' && project === 'post') return { mode, ...easyPostValues(state.easyPost), style: 'Easy', progress: $('xe-progress') };
-    if (mode === 'easy') return { mode, ...easyMixValues(state.easy), style: 'Easy', progress: $('xe-progress') };
+    if (mode === 'easy') {
+      const m = easyMixValues(state.easy);
+      for (const [k, g] of Object.entries(state.autoBus || {})) m.buses[k].gain += g;
+      return { mode, ...m, style: 'Easy', progress: $('xe-progress') };
+    }
     return { mode, values: state.values, buses: state.buses, style: `${STYLES[state.style]?.label} style`, progress: $('x-progress') };
   }
   function engineSettings(sessionStems, job) {
@@ -634,7 +640,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
         name: s.name, category: s.category, role: s.category === 'vocals' ? s.role : '', gain: s.gain, pan: s.pan, mute: s.mute, solo: s.solo,
         polarity: s.polarity, hpf: s.hpf, hpfAuto: s.hpfAuto !== false, drumRole: s.category === 'drums' ? s.drumRole || inferDrumRole(s.name) : null,
         comp: s.comp, compMode: s.compMode, deess: s.deess, width: s.width, monoBass: s.monoBass,
-        eqLow: s.eqLow, eqMid: s.eqMid, eqHigh: s.eqHigh, tune: s.category === 'vocals' ? s.tune || 0 : 0, tuneSpeed: s.tuneSpeed ?? 40,
+        eqLow: s.eqLow, eqMid: s.eqMid, eqHigh: s.eqHigh, tune: s.category === 'vocals' ? s.tune || 0 : 0, tuneSpeed: s.tuneSpeed ?? 40, autoCuts: s.autoCuts,
       })),
       flat: job.mode === 'advanced' && state.style === 'flat',
       glueTouched: v.mixGlue !== MIX_DEFAULTS.mixGlue || Object.keys(BUS_DEFAULTS).some((k) => job.buses[k]?.glue !== BUS_DEFAULTS[k].glue),
@@ -659,6 +665,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
     if (project === 'post') Object.assign(state.easyPost, EASY_POST_NEUTRAL);
     else Object.assign(state.easy, EASY_NEUTRAL);
     for (const st of state.stems) resetStem(st);
+    state.autoBus = null;
     renderEasy();
     renderStems();
     persist();
@@ -670,7 +677,39 @@ export function initMix({ engine, sendToMaster, onMode }) {
     toast('Every control is back to where it changes nothing.');
   });
 
-  // Listen to the stems, set the Easy sliders from what is heard, then mix.
+  // Session rate: the most common WAV/AIFF rate, else 48 kHz.
+  function sessionRate(stems) {
+    const rates = {};
+    for (const s of stems) if (s.info.kind === 'wav' || s.info.kind === 'aiff') rates[s.info.sr] = (rates[s.info.sr] || 0) + 1;
+    return Number(Object.entries(rates).sort((a, b) => b[1] - a[1])[0]?.[0]) || 48000;
+  }
+
+  // A song: read every stem, score them played together, and plan the mix from that.
+  async function planSong(stems, box) {
+    const sr = sessionRate(stems);
+    await engine.run('autoBegin', { sr, length: Math.max(...stems.map((s) => framesAt(s.info, sr))) });
+    for (let i = 0; i < stems.length; i++) {
+      setProgress(box, `Listening to stem ${i + 1}/${stems.length}: ${stems[i].name}`, (i / stems.length) * 0.8);
+      const { payload, transfer } = await workerPayload(stems[i].file, stems[i].info, sr);
+      await engine.run('autoStem', payload, transfer);
+    }
+    setProgress(box, 'Listening to all your stems together', 0.85);
+    return engine.run('autoPlan', { rows: stems.map((s) => ({ name: s.name, category: s.category, role: s.role })), rough: !!state.rough?.info?.valid });
+  }
+
+  // Video, ad or podcast: each voice and the music against them.
+  async function planPost(stems, box) {
+    const rows = [];
+    for (let i = 0; i < stems.length; i++) {
+      setProgress(box, `Listening to stem ${i + 1}/${stems.length}: ${stems[i].name}`, (i / stems.length) * 0.9);
+      const { payload, transfer } = await workerPayload(stems[i].file, stems[i].info);
+      const m = await engine.run('measureStem', { ...payload, noise: stems[i].category === 'vocals' }, transfer);
+      rows.push({ category: stems[i].category, role: stems[i].role, m });
+    }
+    return autoPostSliders(rows);
+  }
+
+  // Listen first, set everything from what is heard, then mix.
   async function autoMix(mode) {
     const anySolo = state.stems.some((s) => s.solo && !s.mute);
     const stems = state.stems.filter((s) => s.info?.valid && !s.mute && (!anySolo || s.solo));
@@ -680,14 +719,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
     renderStems();
     let auto = null;
     try {
-      const rows = [];
-      for (let i = 0; i < stems.length; i++) {
-        setProgress(box, `Listening to stem ${i + 1}/${stems.length}: ${stems[i].name}`, (i / stems.length) * 0.9);
-        const { payload, transfer } = await workerPayload(stems[i].file, stems[i].info);
-        const m = await engine.run('measureStem', { ...payload, noise: project === 'post' && stems[i].category === 'vocals' }, transfer);
-        rows.push({ category: stems[i].category, role: stems[i].role, m });
-      }
-      auto = project === 'post' ? autoPostSliders(rows) : autoMixSliders(rows, { rough: !!state.rough?.info?.valid });
+      auto = project === 'post' ? await planPost(stems, box) : await planSong(stems, box);
     } catch (err) {
       console.error(err);
       setProgress(box, `Stopped: ${err.message}`, 1, 'failed');
@@ -702,16 +734,25 @@ export function initMix({ engine, sendToMaster, onMode }) {
       const keep = Object.fromEntries(['project', 'delivery', 'bitDepth', 'dither', 'outputRate', 'renderBusStems', 'outputMode', 'headroom', 'targetLufs', 'ceiling', 'spatial', 'spatialCentre', 'spatialLfe', 'alternates'].map((k) => [k, state.values[k]]));
       Object.assign(state.values, m.values, keep);
       state.buses = m.buses;
+      for (const [k, g] of Object.entries(auto.buses || {})) state.buses[k].gain += g;
       state.style = 'clean';
       styleChips.set('clean');
       controls.update(state.values);
       renderBuses();
     }
     for (const st of state.stems) resetStem(st);
+    // What the plan moved stays on the stems, so rendering again gives the same mix.
+    state.autoBus = mode === 'easy' ? auto.buses || null : null;
+    (auto.stems || []).forEach((move, i) => {
+      const st = stems[i];
+      st.gain = move.gainDb;
+      st.autoCuts = move.cuts;
+      st.autoNote = [move.gainDb ? `${move.gainDb > 0 ? '+' : ''}${move.gainDb} dB` : '', ...move.cuts.map((c) => `${c.gain} dB at ${c.freq} Hz`)].filter(Boolean).join(', ');
+    });
     renderEasy();
     renderStems();
     persist();
-    render({ ...renderJob(mode), style: 'Auto mix', autoNotes: auto.reasons });
+    render({ ...renderJob(mode), style: 'Auto mix', autoNotes: auto.reasons, autoBoard: auto.board });
   }
   async function render(job) {
     const stems = state.stems.filter((s) => s.info?.valid);
@@ -720,10 +761,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
     const progressBox = job.progress;
     renderStems();
     try {
-      // Session rate: the most common WAV/AIFF rate, else 48 kHz.
-      const rates = {};
-      for (const s of stems) if (s.info.kind === 'wav' || s.info.kind === 'aiff') rates[s.info.sr] = (rates[s.info.sr] || 0) + 1;
-      const sr = Number(Object.entries(rates).sort((a, b) => b[1] - a[1])[0]?.[0]) || 48000;
+      const sr = sessionRate(stems);
       const length = Math.max(...stems.map((s) => framesAt(s.info, sr)));
       const settings = engineSettings(stems, job);
       if (job.mode === 'advanced' && project === 'song' && state.sectionEdits && state.sectionEdits.sig === stemSig()) settings.sections = state.sectionEdits.list;
@@ -751,7 +789,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
         const { payload, transfer } = await workerPayload(stems[i].file, stems[i].info, sr);
         await engine.run('mixStem', { ...payload, index: i }, transfer);
       }
-      const res = await engine.run('mixFinish', {}, [], (stage, f) => setProgress(progressBox, stage, 0.6 + f * 0.38));
+      const res = await engine.run('mixFinish', { autoCheck: !!job.autoBoard }, [], (stage, f) => setProgress(progressBox, stage, 0.6 + f * 0.38));
       let binaural = null;
       if (res.spatial) {
         // Headphone version at the stereo mix's loudness and peak level.
@@ -761,7 +799,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
         const f = await engine.run('finalize', { audio: { sr, channels: chs }, targetLufs: res.report.output.loudness.integrated, ceiling: o.outputMode === 'loudness' ? o.ceiling : o.headroom }, chs.map((c) => c.buffer));
         binaural = { layout: res.spatial.layout, chs: f.channels, lufs: f.lufs, dbtp: f.dbtp };
       }
-      state.result = { ...res, binaural, sr, video: project === 'post' ? state.video : null, style: job.style, autoNotes: job.autoNotes, seconds: (performance.now() - t0) / 1000, output: { bits: job.values.bitDepth, dither: job.values.dither, outputRate: job.values.outputRate } };
+      state.result = { ...res, binaural, sr, video: project === 'post' ? state.video : null, style: job.style, autoNotes: job.autoNotes, autoCard: scoreCard(job.autoBoard, res.report.whole, res.report), seconds: (performance.now() - t0) / 1000, output: { bits: job.values.bitDepth, dither: job.values.dither, outputRate: job.values.outputRate } };
       setProgress(progressBox, 'Mix ready', 1, 'done');
       renderResults();
       toast('Mix ready');
@@ -791,6 +829,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
       kpis(null, out)));
 
     if (r.autoNotes) root.append(el('div', { class: 'card auto-notes' }, el('h2', {}, 'What Auto mix heard'), el('ul', {}, r.autoNotes.map((n) => el('li', {}, n)))));
+    if (r.autoCard) root.append(scoreCardView(r.autoCard));
     const playerCard = el('div', { class: 'card' }, el('div', { class: 'card-head' }, el('h2', {}, 'Compare'), el('span', { class: 'hint' }, 'Unprocessed sum = stems added together with no processing.')));
     root.append(playerCard);
     player = new ABPlayer(playerCard);
@@ -948,6 +987,14 @@ export function initMix({ engine, sendToMaster, onMode }) {
     if (d.voice) items.push(row(d.voice.spreadDb <= 6, `Voices stay within ${fx(d.voice.spreadDb, 1)} dB phrase to phrase${d.voice.spreadDb > 6 ? '; try more “Even out the voices”' : ''}`));
     return section(`Delivery check: ${d.label}`, el('ul', { class: 'check-list' }, items),
       el('p', { class: 'hint' }, 'These are common targets. Always check the delivery spec from your broadcaster, platform or client.'));
+  }
+
+  function scoreCardView(rows) {
+    return el('div', { class: 'card auto-notes' }, el('h2', {}, 'How it measures'),
+      el('ul', { class: 'check-list score-card' }, rows.map((c) => el('li', {},
+        el('span', { class: `mark ${c.pass ? 'pass' : 'check'}` }, c.pass ? 'Met' : 'Check'),
+        el('span', {}, el('b', {}, c.label), el('small', {}, `Goal: ${c.goal}`), el('small', {}, `Stems together ${c.before} → this mix ${c.after}`))))),
+      el('p', { class: 'hint' }, 'Goals come from what finished records measure. How much each part comes through is worked out from the stems; the rest is measured on the finished mix.'));
   }
 
   function roughSection(rough) {

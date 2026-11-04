@@ -251,8 +251,9 @@ export class MixSession {
       if (auto > hpf + 2) { row.steps.push(`High-pass raised ${hpf} → ${auto} Hz (nothing useful below)`); hpf = auto; }
     }
     row.hpf = hpf;
-    toneEq(chs, sr, { hpf, low: st.eqLow, lowFreq: 120, mid: st.eqMid, midFreq: 1500, high: st.eqHigh, highFreq: 7000 });
+    toneEq(chs, sr, { hpf, low: st.eqLow, lowFreq: 120, mid: st.eqMid, midFreq: 1500, high: st.eqHigh, highFreq: 7000, extra: st.autoCuts });
     row.steps.push(`HPF ${hpf} Hz, EQ ${fmt(st.eqLow || 0)}/${fmt(st.eqMid || 0)}/${fmt(st.eqHigh || 0)} dB`);
+    for (const c of st.autoCuts || []) row.steps.push(`Auto mix cut ${fmt(c.gain)} dB at ${c.freq} Hz`);
     if (st.deess && st.category === 'vocals') {
       const d = deess(chs, sr, { amount: 0.55 });
       row.deess = d;

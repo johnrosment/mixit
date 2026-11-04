@@ -7,8 +7,10 @@ import { parseWav } from './wav.js';
 import { parseAiff } from './aiff.js';
 import { learnProfile } from './profile.js';
 import { measureStem } from './automix.js';
+import { AutoSession, measureWhole } from './autoplan.js';
 
 let session = null;
+let auto = null;
 
 // Surround files (WAV / SMPTE channel order: L R C LFE, then the surrounds and
 // heights) are folded to stereo the usual way: centre, surrounds and heights
@@ -66,6 +68,18 @@ self.onmessage = (ev) => {
     } else if (type === 'measureStem') {
       const audio = toAudio(payload);
       self.postMessage({ id, type: 'result', data: measureStem(audio.channels, audio.sr, { noise: !!payload.noise }) });
+    } else if (type === 'autoBegin') {
+      auto = new AutoSession(payload.sr, payload.length);
+      self.postMessage({ id, type: 'result', data: { ok: true } });
+    } else if (type === 'autoStem') {
+      const audio = toAudio(payload);
+      if (audio.sr !== auto.sr) throw new Error(`Stem sample rate ${audio.sr} does not match the session (${auto.sr}).`);
+      auto.addStem(audio);
+      self.postMessage({ id, type: 'result', data: { ok: true } });
+    } else if (type === 'autoPlan') {
+      const plan = auto.plan(payload.rows, { rough: payload.rough });
+      auto = null;
+      self.postMessage({ id, type: 'result', data: plan });
     } else if (type === 'decode') {
       const audio = toAudio(payload);
       self.postMessage({ id, type: 'result', data: audio }, buffersOf(audio.channels));
@@ -109,6 +123,7 @@ self.onmessage = (ev) => {
     } else if (type === 'mixFinish') {
       if (!session) throw new Error('No mix session is open.');
       const res = session.finish(progress);
+      if (payload.autoCheck) res.report.whole = measureWhole(res.channels, session.sr);
       session = null;
       const transfers = [...buffersOf(res.channels), ...buffersOf(res.rawSum), ...Object.values(res.busStems || {}).flatMap(buffersOf), ...buffersOf(res.spatial?.chs), ...(res.alternates || []).flatMap((a) => buffersOf(a.chs))];
       self.postMessage({ id, type: 'result', data: res }, transfers);

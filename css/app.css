@@ -309,6 +309,9 @@ input[type="range"]:disabled { cursor: not-allowed; }
 .easy-tools { display: flex; justify-content: flex-end; margin-bottom: -8px; }
 .btn.reset-all { margin-top: 10px; }
 .auto-notes ul { margin: 8px 0 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
+.auto-notes ul.score-card { padding-left: 0; gap: 10px; margin-bottom: 12px; }
+.score-card small { display: block; color: var(--muted); }
+small.auto-note { display: block; color: var(--teal-deep); }
 .progress { margin-top: 12px; display: grid; grid-template-columns: auto 1fr; gap: 8px 12px; align-items: center; }
 .progress .bar { height: 14px; background: var(--card-2); border: 2px solid var(--ink); overflow: hidden; }
 .progress .bar i {
