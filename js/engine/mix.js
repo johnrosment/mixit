@@ -3,7 +3,7 @@
 // rider, effects returns and the mix bus run in finish().
 
 import { integratedLufs, integratedFromHops, loudnessRangeFromHops, hopEnergies, truePeak, lin2db } from './loudness.js';
-import { compress, deess, transientShape, detectorDb, percentileDb, shapeMoves, applyShape } from './dynamics.js';
+import { compress, deess, transientShape, detectorDb, percentileDb, shapeMoves, applyShape, limitWithEnvelope, peakEnvelope } from './dynamics.js';
 import { toneEq, width, pan, gain, reverb, delay, addInto, saturate, chorus } from './effects.js';
 import { design, cascade, lr4Split2, lr4Split3, zeroPhaseLowpass } from './filters.js';
 import { analyze } from './analyze.js';
@@ -27,6 +27,7 @@ const POST_TARGETS = { vocals: -20, drums: -27, bass: -27, music: -25, fx: -26, 
 const VOICE_LUFS = -24; // each voice is brought to this before the bus, so speakers match
 const SUPPORT_OFFSET = -6; // doubles/backing relative to lead vocal
 const ROUGH_MAX_DB = 4; // the most its tone can move the finished mix
+const DRUM_HITS = { lookaheadMs: 2, releaseMs: 40 }; // quick, so only the tip of a hit is touched
 const KEEP_TONE = 0.7; // how much of the tone the processing added Auto mix takes back
 const KEEP_TONE_DB = 3; // the most that can be, before the strength
 const ROUGH_LEFT_OUT_DB = -24; // a stem barely found in it stays this far under the loudest
@@ -248,6 +249,7 @@ export class MixSession {
       this.holdBus ||= {};
       if (this.holdBus[k]) h.energy.forEach((e, j) => { this.holdBus[k].energy[j] += e; });
       else this.holdBus[k] = { energy: Float64Array.from(h.energy), hop: h.hop };
+      if (k === 'drums') addInto(this.heldDrums ||= stereoBuf(n), chs, 1);
       // (With the plan's cuts in, so holding the tone does not take them back out.)
       this.heldSum ||= stereoBuf(n);
       const cuts = st.autoCuts?.length ? chs.map((c) => new Float32Array(c)) : chs;
@@ -576,6 +578,20 @@ export class MixSession {
         gain(buses[key], Math.max(-6, Math.min(6, setLufs[key] - integratedLufs(buses[key], sr))));
       }
     }
+    // The drum stages above lift the hits over the height they came in at, and the limiter at the
+    // end would then pull the whole mix down on each one. So they go back to that height here.
+    if (balance && (roughSet || held) && used.drums && this.heldDrums) {
+      const rawLufs = integratedLufs(this.heldDrums, sr);
+      if (rawLufs > -70) {
+        const ceilingDb = truePeak(this.heldDrums, sr).dbtp + setLufs.drums - rawLufs;
+        const l = limitWithEnvelope(buses.drums, sr, peakEnvelope(buses.drums, sr), { ceilingDb, lookaheadMs: DRUM_HITS.lookaheadMs, releaseMs: DRUM_HITS.releaseMs });
+        if (l.maxGr > 0.1) {
+          log.push(`The drums’ hits go back to the height they came in at (up to ${l.maxGr.toFixed(1)} dB).`);
+          if (!used.vocals) gain(buses.drums, Math.max(-6, Math.min(6, setLufs.drums - integratedLufs(buses.drums, sr))));
+        }
+      }
+    }
+    this.heldDrums = null;
 
     // --- Section automation (after the rider, so it does not undo the moves) ---
     let sections = null, sendCurve = null;

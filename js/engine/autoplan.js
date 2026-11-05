@@ -12,18 +12,18 @@ import { stemMap, MAP_BANDS, mapHop, waveStep, waveCopy, readStemLevels, roughFe
 
 export { stemMap };
 
-// Set safely under six finished songs at their real balance, as moving a good balance
+// Set safely under seven songs at their real balance, as moving a good balance
 // does more harm than missing a bad one. Those songs are the only evidence so far.
 export const GOALS = {
-  heard: 0.25,        // the least of a part that comes through the rest, with few parts (quietest part: 26% to 47%)
-  heardShared: 0.6,   // shared out as parts are added (the quietest of seven held parts: 12%)
+  heardShared: 0.3,   // the least of a part that comes through the rest, shared out as parts are added
+                      // (quietest part with two to four parts: 26% to 47%; seven parts: 12%; six parts, one a quiet layer: 6%)
   heardVoice: 0.35,   // a lead voice carries the song (not yet checked on a real one)
   heardQuiet: 0.05,   // effects and ambience are meant to sit under
   swamp: { 2: 0.75, 3: 0.7, more: 0.55 }, // the most of the loudness one part may hold (two parts: 67%, three: 38% and 64%, four or more: 36% to 45%)
   holds: 0.6,         // shared out among up to four parts: the least of the loudness a melodic part or voice holds while it plays
                       // (two parts: 33%, three: 35%, four: 22%). Not bass or drums: one song's bass holds 6% and sounds right there.
   buildUp: 7,         // dB one octave from 125 Hz to 1 kHz may stand over its neighbours (songs: up to 6.8)
-  tilt: [-9, -3],     // dB per octave from 250 Hz to 4 kHz (songs: -8.7 to -4.3)
+  tilt: [-10, -1],    // dB per octave from 250 Hz to 4 kHz (songs: -8.7 to -2.0)
   shape: 0.7,         // how much of the stems' loudness range the mix keeps (songs: 78% to 99%)
   mono: 3,            // LU lost when played in mono
 };
@@ -129,8 +129,11 @@ const isQuiet = (r) => r.category === 'fx' || r.category === 'ambience';
 const heardGoal = (row, parts) => {
   if (row.category === 'vocals' && row.role === 'lead') return GOALS.heardVoice;
   if (isQuiet(row)) return GOALS.heardQuiet;
-  return Math.min(GOALS.heard, GOALS.heardShared / parts);
+  return GOALS.heardShared / Math.max(2, parts);
 };
+// Drums keep the dynamics they came in with: compressing them and bringing the level back only lifts
+// their hits, which the limiter then takes out of the whole mix. (On all three songs with drums.)
+const heldComp = (row) => (row.category === 'drums' ? { comp: 0 } : {});
 const swampGoal = (parts) => GOALS.swamp[parts] ?? GOALS.swamp.more;
 const holdsGoals = (rows, parts) => rows.map((r) => (parts >= 2 && parts <= 4 && !isQuiet(r) && r.category !== 'drums' && r.category !== 'bass' ? GOALS.holds / parts : 0));
 
@@ -272,7 +275,7 @@ export class AutoSession {
     // Your rough mix decides the balance and tone, so only the whole is scored.
     if (rough) {
       const { sliders, reasons } = autoMixSliders(rows, { rough: true });
-      return { sliders, reasons, stems: rows.map(() => ({ gainDb: 0, cuts: [] })), board, hold: true };
+      return { sliders, reasons, stems: rows.map((r) => ({ gainDb: 0, cuts: [], ...heldComp(r) })), board, hold: true };
     }
 
     const parts = rows.filter((r) => r.m.lufs > -70).length;
@@ -304,7 +307,7 @@ export class AutoSession {
     if (tilt < lo) { sliders.highs = Math.min(HIGHS_MAX, Math.round((lo - tilt) * 10) / 20 + 0.1); said.push('The stems together are darker than finished songs, so the highs come up a little.'); }
     else if (tilt > hi) { sliders.highs = -Math.min(HIGHS_MAX, Math.round((tilt - hi) * 10) / 20 + 0.1); said.push('The stems together are brighter than finished songs, so the highs come down a little.'); }
     const unmoved = !anyMove && !cuts.some((c) => c.length) && !sliders.highs;
-    if (unmoved) said.push('Played together, your stems already meet the balance and tone goals, so they stay where they are.');
+    if (unmoved) said.push('Played together, your stems already meet the balance and tone goals, so each one stays at its level.');
 
     const heardGoals = rows.map((r) => heardGoal(r, parts)), holds = holdsGoals(rows, parts);
     const lo0 = lowest(first.heard, heardGoals), lo1 = lowest(last.heard, heardGoals);
@@ -326,7 +329,7 @@ export class AutoSession {
     }
     return {
       sliders, reasons: [...said, ...reasons], hold: true, roughSetAside: offered,
-      stems: rows.map((_, i) => ({ gainDb: move[i], cuts: cuts[i] })),
+      stems: rows.map((r, i) => ({ gainDb: move[i], cuts: cuts[i], ...heldComp(r) })),
       board,
     };
   }

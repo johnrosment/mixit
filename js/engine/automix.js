@@ -112,6 +112,7 @@ export function autoMixSliders(rows, { rough = false, moved = false } = {}) {
   if (has('drums')) {
     const drums = loudestFirst(live.filter((r) => r.category === 'drums'))[0];
     if (drums.m.crest < 12) { e.punch = 0.65; reasons.push('The drums are already squashed, so they get a little more punch.'); }
+    reasons.push('The drums keep the dynamics they came in with, so the limiter has less to do.');
   }
   // Space: the voice decides if there is one; otherwise how wide the instruments already are.
   if (lead) {

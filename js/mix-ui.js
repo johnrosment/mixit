@@ -758,6 +758,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
       const st = stems[i];
       st.gain = move.gainDb;
       st.autoCuts = move.cuts;
+      if (move.comp != null) st.comp = move.comp;
       st.autoNote = [move.gainDb ? `${move.gainDb > 0 ? '+' : ''}${move.gainDb} dB` : '', ...move.cuts.map((c) => `${c.gain} dB at ${c.freq} Hz`)].filter(Boolean).join(', ');
     });
     renderEasy();
