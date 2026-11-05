@@ -67,7 +67,7 @@ function heldBands(rows) {
 }
 const sumBands = (byBus, keys, band) => keys.reduce((a, k) => a + (byBus[k]?.[band] || 0), 0);
 const loudestFirst = (rows) => [...rows].sort((a, b) => b.m.lufs - a.m.lufs);
-const leadOf = (rows) => loudestFirst(rows.filter((r) => r.category === 'vocals' && r.role === 'lead'))[0] || loudestFirst(rows.filter((r) => r.category === 'vocals'))[0] || null;
+export const leadOf = (rows) => loudestFirst(rows.filter((r) => r.category === 'vocals' && r.role === 'lead'))[0] || loudestFirst(rows.filter((r) => r.category === 'vocals'))[0] || null;
 // Below this much correlation a stem already has its own space (stereo reverb or a wide patch).
 const spaceOf = (rows) => {
   let e = 0, w = 0;

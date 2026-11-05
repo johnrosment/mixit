@@ -279,7 +279,7 @@ export function inferRole(name) {
     return 'double';
   }
   if (/ad-?libs?/.test(n)) return 'adlib';
-  if (/(^|[^a-z])(backing|bgv|harmon(y|ies)|bv)([^a-z]|$)/.test(n)) return 'backing';
+  if (/(^|[^a-z])(backing|backup|bgvs?|bgs?|bkg|harmon(y|ies)|bvs?)([^a-z]|$)/.test(n) || /(^|[^A-Za-z])BGs?(?=[A-Z][a-z])/.test(name)) return 'backing';
   return 'lead';
 }
 
@@ -652,9 +652,9 @@ export function initMix({ engine, sendToMaster, onMode }) {
       glueTouched: v.mixGlue !== MIX_DEFAULTS.mixGlue || Object.keys(BUS_DEFAULTS).some((k) => job.buses[k]?.glue !== BUS_DEFAULTS[k].glue),
       tuneKey: v.tuneKey, sectionAuto: v.sectionAuto, mixLow: v.mixLow, mixHigh: v.mixHigh, mixTape: v.mixTape,
       vocalChorus: v.vocalChorus, drumParallel: v.drumParallel, drumDrive: v.drumDrive, bassGrit: v.bassGrit, delaySync: v.delaySync, musicCleanup: v.musicCleanup, alternates: v.alternates,
-      autoBalance: v.autoBalance, balanceAmount: v.balanceAmount, roughTone: v.roughTone, vocalLevel: v.vocalLevel, vocalPresence: v.vocalPresence, riderStrength: v.riderStrength, riderWindow: v.riderWindow,
+      autoBalance: v.autoBalance, balanceAmount: v.balanceAmount, roughTone: v.roughTone, vocalLevel: v.vocalLevel, vocalPresence: v.vocalPresence, riderStrength: state.autoHold && job.mode === 'easy' ? 0 : v.riderStrength, riderWindow: v.riderWindow,
       transientEnergy: v.transientEnergy, bassTightness: v.bassTightness, bassDuck: v.bassDuck, stereoWidth: v.stereoWidth,
-      duckAmount: v.duckAmount, duckRelease: v.duckRelease, mixGlue: v.mixGlue,
+      duckAmount: state.autoHold && state.autoRough && state.rough && job.mode === 'easy' ? 0 : v.duckAmount, duckRelease: v.duckRelease, mixGlue: v.mixGlue,
       buses: structuredClone(job.buses),
       reverb: { enabled: v.reverbEnabled, kind: v.reverbKind, decay: v.reverbDecay, predelay: v.reverbPredelay, level: v.reverbLevel },
       delay: { enabled: v.delayEnabled, time: v.delayTime, feedback: v.delayFeedback, pingpong: v.delayPingpong, level: v.delayLevel },
@@ -745,6 +745,10 @@ export function initMix({ engine, sendToMaster, onMode }) {
       const m = project === 'post' ? easyPostValues(state.easyPost) : easyMixValues(state.easy);
       const keep = Object.fromEntries(['project', 'delivery', 'bitDepth', 'dither', 'outputRate', 'renderBusStems', 'outputMode', 'headroom', 'targetLufs', 'ceiling', 'spatial', 'spatialCentre', 'spatialLfe', 'alternates'].map((k) => [k, state.values[k]]));
       Object.assign(state.values, m.values, keep);
+      // Auto mix keeps each section's balance as it found it, so the vocal is not ridden against the music.
+      // With your rough mix it already has room for the vocal, so the music does not dip under it as well.
+      if (auto.hold) state.values.riderStrength = 0;
+      if (auto.hold && auto.rough) state.values.duckAmount = 0;
       state.buses = m.buses;
       state.style = 'clean';
       styleChips.set('clean');
@@ -754,6 +758,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
     for (const st of state.stems) resetStem(st);
     // What the plan moved stays on the stems, so rendering again gives the same mix.
     state.autoHold = !!auto.hold;
+    state.autoRough = !!auto.rough;
     (auto.stems || []).forEach((move, i) => {
       const st = stems[i];
       st.gain = move.gainDb;
@@ -1013,12 +1018,14 @@ export function initMix({ engine, sendToMaster, onMode }) {
     const f = rough.fit;
     const lines = [];
     if (!f) lines.push('Your rough mix was loaded, but “Even out the levels” is off, so only its tone was used.');
-    else if (f.rejected) lines.push('Your rough mix did not line up with these stems, so it was not used. Check that it is a bounce of the same song from the same starting point.');
+    else if (f.rejected) lines.push('Your rough mix did not line up with these stems, so it was not used. Check that it is a bounce of the same song.');
     else {
-      const notes = [Math.abs(f.lagSec) >= 0.02 ? `it starts ${Math.abs(f.lagSec).toFixed(2)} s ${f.lagSec > 0 ? 'later' : 'earlier'} than the stems` : null, f.errDb >= 0.1 ? `matched to within ${fx(f.errDb, 1)} dB` : null].filter(Boolean);
+      const notes = [Math.abs(f.lagSec) >= 0.02 ? (f.lagSec > 0 ? `the stems start ${f.lagSec.toFixed(2)} s into it` : `it starts ${(-f.lagSec).toFixed(2)} s into the stems`) : null, f.errDb >= 0.1 ? `matched to within ${fx(f.errDb, 1)} dB` : null].filter(Boolean);
       lines.push(`Levels follow your rough mix${notes.length ? ` (${notes.join('; ')})` : ''}.`);
       if (f.stems) {
-        lines.push(`Each stem was set to its level in it. Compared with your files: ${f.stems.map((x) => `${x.name} ${fx(x.db, 1)} dB`).join(', ')}.`);
+        lines.push(`Each stem was set to its level in it. Compared with your files, the middle stem at 0 dB: ${f.stems.map((x) => `${x.name} ${x.db > 0 ? '+' : ''}${fx(x.db, 1)} dB`).join(', ')}.`);
+        const along = f.stems.filter((x) => x.moves?.length);
+        if (along.length) lines.push(`Some parts change level along the song in it, and follow it there: ${along.map((x) => `${x.name} ${x.moves.map((v) => `${v.db > 0 ? '+' : ''}${fx(v.db, 1)} dB from ${fmtT(v.from).replace(/\.\d$/, '')} to ${fmtT(v.to).replace(/\.\d$/, '')}`).join(', ')}`).join('; ')}.`);
         if (f.share != null && f.share < 0.75) lines.push(`Your stems make up about ${Math.round(f.share * 100)}% of its sound, so it holds something else too: parts you did not add, or effects.`);
       } else if (f.stemsUnread) lines.push('It does not match the stems sample for sample, so stems in the same group keep their own balance.');
     }

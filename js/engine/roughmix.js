@@ -139,7 +139,7 @@ export function fitBalance(buses, rough, read = null) {
   const feats = keys.map((k) => buses[k]);
   const total = new Float64Array(feats[0].hops);
   for (const f of feats) for (let j = 0; j < total.length; j++) total[j] += f.total[j];
-  const lag = findLag(total, rough.total);
+  const lag = read ? { lagHops: Math.round(read.offsetSec / HOP), r: null } : findLag(total, rough.total);
   const H = feats[0].hops;
   // Frame energies (0.4 s), with the rough mix shifted by the measured lag.
   const rows = [];
@@ -212,9 +212,14 @@ const WAVE_RATE = 12000;       // rate of the light copies used for the fit
 const WAVE_BYTES = 4e8;        // the most memory those copies may take
 const WAVE_FRAME = 2048;
 const WAVE_EDGES = [40, 100, 200, 400, 800, 1600, 3200, 5500];
-const OFFSET_SPAN = 2 ** 20;   // samples compared to line the two up (about 87 s)
+const OFFSET_SPAN = 2 ** 20;   // samples of the stems compared to line the two up (about 87 s)
+const OFFSET_REACH = 2 ** 20;  // how far the rough mix is searched either way, as a finished song can start well before its stems
 const MIN_OFFSET_PEAK = 50;    // below this they do not line up sample for sample
+const OFFSET_TRIES = 16;       // best matches checked over the whole song
+const OFFSET_APART = 0.02;     // seconds that keep two matches apart
+const OFFSET_SLICE = 8;        // seconds of each piece of that check
 const FIT_LOAD = 20000;        // stems² × seconds fitted frame by frame; more is thinned out
+const WAVE_STRONG = 0.01;      // a band counts toward a stem's level within 20 dB of its strongest
 
 /** How far to thin the light copies, so a big session stays within memory. */
 export const waveStep = (sr, samples, stems) => Math.max(1, Math.round(sr / WAVE_RATE), Math.ceil((8 * samples * stems) / WAVE_BYTES));
@@ -234,19 +239,51 @@ export function waveCopy(chs, step, samples) {
   });
 }
 
+/** Light copy of the rough mix, which may run past the stems as far as the search can reach. */
+export const roughCopy = (chs, step, samples) => waveCopy(chs, step, Math.max(samples, Math.min(chs[0].length, samples + 2 * OFFSET_REACH * step)));
+
+/** Mono with the lows thinned out, so a master's high-pass turning them round doesn't matter. */
+function thinned(channelSets, length) {
+  const o = new Float32Array(length);
+  for (const chs of channelSets) for (const c of chs) { let last = 0; for (let i = 0; i < Math.min(length, c.length); i++) { o[i] += c[i] - last; last = c[i]; } }
+  return o;
+}
+
+/** How well the two agree at this offset, on average over the whole song. Stretches with no stems don't count, ones with no rough mix count as nothing. */
+function holdsAcross(stems, rough, lag, W, quiet) {
+  let sum = 0, count = 0;
+  for (let t = 0; t + W <= stems.length; t += W) {
+    let xx = 0, yy = 0, xy = 0;
+    for (let i = 0; i < W; i++) {
+      const j = t + i + lag, x = stems[t + i], y = j >= 0 && j < rough.length ? rough[j] : 0;
+      xx += x * x;
+      yy += y * y;
+      xy += x * y;
+    }
+    if (xx <= quiet) continue;
+    count++;
+    if (yy > 0) sum += Math.max(0, xy / Math.sqrt(xx * yy));
+  }
+  return count ? sum / count : 0;
+}
+
 /**
  * Offset of the rough mix against the stems in samples, from the part of the
- * song around its middle. Only the timing counts here (each bin is weighed the
- * same), so the result is not pulled around by the low end's phase. `peak` says
- * how far the best match stands out: a different file has no clear one.
+ * stems around their middle. Only the timing counts here (each bin is weighed
+ * the same), so the result is not pulled around by the low end's phase. A song
+ * built from exact loops also matches itself a bar or more away, so the best
+ * few matches are checked over the whole song: only the true one holds
+ * throughout. `peak` says how far the match stands out: a different file has no
+ * clear one.
  */
-function waveOffset(stems, rough, rate, maxSec = 4) {
-  const n = rough[0].length, span = Math.min(n, OFFSET_SPAN);
+function waveOffset(stems, rough, rate) {
+  const n = stems[0][0].length, span = Math.min(n, OFFSET_SPAN);
   const from = Math.floor((n - span) / 2);
-  const N = nextPow2(2 * span);
+  const at = Math.max(0, from - OFFSET_REACH), reach = Math.max(0, Math.min(rough[0].length, from + span + OFFSET_REACH) - at);
+  const N = nextPow2(span + reach);
   const ar = new Float64Array(N), ai = new Float64Array(N), br = new Float64Array(N), bi = new Float64Array(N);
   for (const s of stems) for (const c of s) for (let i = 0; i < span; i++) ar[i] += c[from + i] || 0;
-  for (const c of rough) for (let i = 0; i < span; i++) br[i] += c[from + i];
+  for (const c of rough) for (let i = 0; i < reach; i++) br[i] += c[at + i];
   fft(ar, ai);
   fft(br, bi);
   const lo = Math.floor((150 * N) / rate);
@@ -257,17 +294,29 @@ function waveOffset(stems, rough, rate, maxSec = 4) {
     ai[k] = use ? im / m : 0;
   }
   fft(ar, ai, true);
-  const L = Math.round(maxSec * rate);
-  let best = 0, lag = 0, sum = 0, count = 0;
+  let sum = 0, top = 0;
+  for (let k = 0; k < N; k++) { const v = Math.abs(ar[k]); sum += v; if (v > top) top = v; }
+  const mean = sum / N;
+  if (!(mean > 0) || top < MIN_OFFSET_PEAK * mean) return { lag: 0, peak: mean > 0 ? top / mean : 0 };
+  const peaks = [];
   for (let k = 0; k < N; k++) {
-    const at = k < N / 2 ? k : k - N;
-    if (Math.abs(at) > L) continue;
     const v = Math.abs(ar[k]);
-    sum += v;
-    count++;
-    if (v > best) { best = v; lag = at; }
+    if (v >= MIN_OFFSET_PEAK * mean) peaks.push({ lag: (k < reach ? k : k - N) + at - from, v });
   }
-  return { lag, peak: count && sum > 0 ? best / (sum / count) : 0 };
+  peaks.sort((a, b) => b.v - a.v);
+  const apart = Math.round(OFFSET_APART * rate), tries = [];
+  for (const p of peaks) {
+    if (tries.every((q) => Math.abs(q.lag - p.lag) > apart)) tries.push(p);
+    if (tries.length >= OFFSET_TRIES) break;
+  }
+  let pick = tries[0];
+  if (tries.length > 1) {
+    const a = thinned(stems, n), b = thinned([rough], rough[0].length), W = Math.min(n, Math.round(OFFSET_SLICE * rate));
+    const quiet = (1e-4 * W * a.reduce((e, v) => e + v * v, 0)) / n;
+    let most = -1;
+    for (const p of tries) { const h = holdsAcross(a, b, p.lag, W, quiet); if (h > most) { most = h; pick = p; } }
+  }
+  return { lag: pick.lag, peak: pick.v / mean };
 }
 
 /**
@@ -350,25 +399,28 @@ export function fitStemLevels(stems, rough, rate) {
       }
     });
   }
-  // log(power gain) = stem level + tone of the band, weighted by the energy behind each reading.
+  // Energy a stem puts into a band = its own energy there × its level × the band's tone. Only bands near
+  // the stem's strongest count: where it has next to nothing, its gain is free to grow and soak up
+  // whatever else the song holds (a quiet hi-hat once read 30 dB too high from the lows).
   const dB = (v) => 10 * Math.log10(v + 1e-20);
-  const seen = put.map((row, i) => Array.from(row, (v, b) => (own[i][b] > 0 ? dB(v / own[i][b]) : 0)));
-  const allPut = put.reduce((a, row) => a + row.reduce((p, v) => p + v, 0), 0);
-  const level = new Float64Array(m), tone = new Float64Array(B);
-  for (let it = 0; it < 30; it++) {
+  const counts = own.map((row) => { const most = Math.max(...row); return Array.from(row, (v) => v > 0 && v >= WAVE_STRONG * most); });
+  const allPut = put.reduce((a, row, i) => a + row.reduce((p, v, b) => p + (counts[i][b] ? v : 0), 0), 0);
+  const calm = (0.05 * allPut) / B + 1e-30; // a band with little in it stays near no change
+  const level = new Float64Array(m).fill(1), tone = new Float64Array(B).fill(1);
+  for (let it = 0; it < 60; it++) {
     for (let i = 0; i < m; i++) {
       let num = 0, den = 0;
-      for (let b = 0; b < B; b++) { num += put[i][b] * (seen[i][b] - tone[b]); den += put[i][b]; }
+      for (let b = 0; b < B; b++) if (counts[i][b]) { num += put[i][b]; den += own[i][b] * tone[b]; }
       level[i] = den > 0 ? num / den : 0;
     }
     for (let b = 0; b < B; b++) {
-      let num = 0, den = (0.05 * allPut) / B + 1e-30;
-      for (let i = 0; i < m; i++) { num += put[i][b] * (seen[i][b] - level[i]); den += put[i][b]; }
+      let num = calm, den = calm;
+      for (let i = 0; i < m; i++) if (counts[i][b]) { num += put[i][b]; den += own[i][b] * level[i]; }
       tone[b] = num / den;
     }
   }
-  const db = Array.from(level, (v, i) => (put[i].some((p) => p > 0) ? v : null));
-  return { db, toneDb: Array.from(tone), share: total > 0 ? found / total : 0, offsetSec: lag / rate, lag, peak };
+  const db = Array.from(level, (v, i) => (put[i].some((p) => p > 0) ? dB(v) : null));
+  return { db, toneDb: Array.from(tone, dB), share: total > 0 ? found / total : 0, offsetSec: lag / rate, lag, peak };
 }
 
 // --- Each stem's level, from how its energy moves over time ---
@@ -494,8 +546,8 @@ function energyLevels(stems, rough, rate, lag) {
 }
 
 const READ_EXACT = 0.9;  // the waveforms account for this much of it: they line up, so they are exact
-const READ_FITS = 3.5;   // dB left unexplained by the energy fit. All of a song's stems leave up to
-                         // 2.7; part of them leave 4.8 or more, as the song holds what is missing.
+const READ_FITS = 3.8;   // dB left unexplained by the energy fit. All of a song's stems leave up to
+                         // 3.6; part of them leave 4.1 or more, as the song holds what is missing.
 const READ_CLOSE = 1.5;  // dB between readings the energy can't tell apart, so nothing moves
 
 /**
@@ -515,4 +567,212 @@ export function readStemLevels(stems, rough, rate) {
   const found = energy.db.filter((v) => v != null);
   const close = Math.max(...found) - Math.min(...found) <= READ_CLOSE;
   return { ...wave, db: close ? energy.db.map((v) => (v == null ? null : 0)) : energy.db, share: null, method: 'energy', leftover: energy.leftover };
+}
+
+// --- Each stem's level, section by section ---
+// A finished song rides its parts: a choir can sit low in one chorus and high in the last, and one level
+// for the whole song is then wrong in both. Here each stem is read again in 8 s windows, at fine time and
+// pitch resolution, but only in the cells where it plays nearly alone, so nothing else in the song can be
+// taken for it. A stem owns a cell only if it would stand out there at an ordinary level: one read loud
+// cannot claim cells by being read loud. A part moves only where it sits steadily off its own level.
+// Over eight songs and plain bounces of them, no part sat 2 dB off for 20 s when it had not been
+// ridden; rides of 3 to 5 dB set into a bounce for 30 s were found to within 0.1 dB.
+const SECTION_WIN = 8;       // seconds per window
+const SECTION_STEP = 4;      // seconds between windows
+const SECTION_OWN = 6;       // dB a stem must stand out by to own a cell
+const SECTION_CELLS = 80;    // cells a stem needs in a window to be read there
+const SECTION_MIN = 2;       // dB a stem must sit off its own level to move
+const SECTION_RUN = 4;       // windows in a row (20 s) it must stay off by that much
+const SECTION_MAX = 12;      // dB either way at most
+const SECTION_LOW = 100, SECTION_HIGH = 8000; // Hz read
+const HIST_STEP = 0.5, HIST_LO = -40, HIST_N = 161;
+
+const middleOf = (list) => { const s = [...list].sort((a, b) => a - b), k = s.length >> 1; return s.length % 2 ? s[k] : (s[k - 1] + s[k]) / 2; };
+const histMedian = (h) => {
+  let total = 0;
+  for (let k = 0; k < h.length; k++) total += h[k];
+  if (!total) return null;
+  for (let k = 0, c = 0; k < h.length; k++) { c += h[k]; if (c >= total / 2) return HIST_LO + k * HIST_STEP; }
+  return null;
+};
+
+/**
+ * How each stem's level in your rough mix changes along the song, from the light copies.
+ * `lag`: rough-mix sample = stem sample + lag. `db`: each stem's whole-song level (null if left out).
+ * Returns, per stem, null (it keeps one level) or the points of a gain curve in dB and the stretches it moves.
+ */
+export function sectionLevels(stems, rough, rate, lag, db) {
+  const m = stems.length, n = stems[0][0].length;
+  const N = nextPow2(0.09 * rate), H = N / 2;
+  const hann = Float64Array.from({ length: N }, (_, i) => 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / N));
+  const k0 = Math.ceil((SECTION_LOW * N) / rate), k1 = Math.min(N / 2, Math.floor((Math.min(SECTION_HIGH, 0.45 * rate) * N) / rate));
+  const bandOf = Int16Array.from({ length: k1 }, (_, k) => Math.max(0, Math.floor(3 * Math.log2(Math.max(SECTION_LOW, (k * rate) / N) / SECTION_LOW))));
+  const NB = bandOf[k1 - 1] + 1;
+  const frames = Math.floor((n - N) / H);
+  const per = Math.max(1, Math.round((SECTION_STEP * rate) / H)), slots = Math.ceil(frames / per), span = Math.round(SECTION_WIN / SECTION_STEP);
+  if (frames < 1 || slots < span + SECTION_RUN - 1) return { curves: stems.map(() => null) };
+  const g = db.map((v) => (v == null ? 0 : Math.pow(10, v / 10)));
+  const heard = g.filter((v) => v > 0).sort((a, b) => a - b);
+  if (heard.length < 2) return { curves: stems.map(() => null) };
+  const ordinary = heard[heard.length >> 1];
+  const ownScale = g.map((v) => (v > 0 ? Math.min(1, ordinary / v) : 0));
+  const lead = Math.pow(10, SECTION_OWN / 10);
+  // Counts per stem, 4 s slot and third octave, of the song's level over the stems' in the cells the stem owns.
+  const hist = Array.from({ length: m }, () => Array.from({ length: slots * NB }, () => new Uint16Array(HIST_N)));
+  const re = new Float64Array(N), im = new Float64Array(N), R = new Float64Array(k1), T = new Float64Array(k1);
+  const P = stems.map(() => new Float64Array(k1));
+  const frameEnergy = new Float64Array(frames);
+  let top = 0;
+  for (let f = 0; f < frames; f++) {
+    let e = 0;
+    for (let i = 0; i < m; i++) if (g[i]) for (let c = 0; c < 2; c++) { const x = stems[i][c]; for (let j = 0; j < N; j += 4) e += g[i] * x[f * H + j] * x[f * H + j]; }
+    frameEnergy[f] = e;
+    if (e > top) top = e;
+  }
+  for (let f = 0; f < frames; f++) {
+    if (frameEnergy[f] < 1e-5 * top) continue;
+    const t = f * H, tr = t + lag;
+    if (tr < 0 || tr + N > rough[0].length) continue;
+    R.fill(0); T.fill(0);
+    for (let c = 0; c < 2; c++) {
+      for (let j = 0; j < N; j++) { re[j] = rough[c][tr + j] * hann[j]; im[j] = 0; }
+      fft(re, im);
+      for (let k = k0; k < k1; k++) R[k] += re[k] * re[k] + im[k] * im[k];
+    }
+    for (let i = 0; i < m; i++) {
+      const p = P[i];
+      p.fill(0);
+      if (!g[i]) continue;
+      for (let c = 0; c < 2; c++) {
+        const x = stems[i][c];
+        let any = 0;
+        for (let j = 0; j < N; j++) { const v = x[t + j] * hann[j]; re[j] = v; im[j] = 0; any += v * v; }
+        if (any < 1e-14) continue;
+        fft(re, im);
+        for (let k = k0; k < k1; k++) p[k] += g[i] * (re[k] * re[k] + im[k] * im[k]);
+      }
+      for (let k = k0; k < k1; k++) T[k] += p[k];
+    }
+    let most = 0;
+    for (let k = k0; k < k1; k++) if (T[k] > most) most = T[k];
+    const slot = Math.min(slots - 1, Math.floor(f / per));
+    for (let k = k0; k < k1; k++) {
+      if (T[k] < 1e-4 * most || R[k] <= 0) continue;
+      for (let i = 0; i < m; i++) {
+        const e = P[i][k];
+        if (e <= 0 || e * ownScale[i] < lead * (T[k] - e)) continue;
+        const bin = Math.max(0, Math.min(HIST_N - 1, Math.round((10 * Math.log10(R[k] / T[k]) - HIST_LO) / HIST_STEP)));
+        const h = hist[i][slot * NB + bandOf[k]];
+        if (h[bin] < 65535) h[bin]++;
+        break;
+      }
+    }
+  }
+  // The song's tone, band by band, over every cell any stem owns: EQ on it is not taken for a level.
+  const shift = Array.from({ length: NB }, (_, b) => {
+    const h = new Float64Array(HIST_N);
+    for (let i = 0; i < m; i++) for (let s = 0; s < slots; s++) { const x = hist[i][s * NB + b]; for (let k = 0; k < HIST_N; k++) h[k] += x[k]; }
+    return Math.round((histMedian(h) ?? 0) / HIST_STEP);
+  });
+  const pool = (who, s0, s1) => {
+    const h = new Float64Array(HIST_N);
+    for (const i of who) for (let s = s0; s < s1; s++) for (let b = 0; b < NB; b++) {
+      const x = hist[i][s * NB + b], sh = shift[b];
+      for (let k = 0; k < HIST_N; k++) { const kk = k - sh; if (x[k] && kk >= 0 && kk < HIST_N) h[kk] += x[k]; }
+    }
+    return h;
+  };
+  const cells = (h) => h.reduce((a, v) => a + v, 0);
+  const all = Array.from({ length: m }, (_, i) => i);
+  const wins = slots - span + 1;
+  // Each stem's level in each window: the middle of its cells there.
+  const lvl = all.map((i) => Array.from({ length: wins }, (_, w) => { const h = pool([i], w, w + span); return cells(h) >= SECTION_CELLS ? histMedian(h) : null; }));
+  // Split into a level for each stem, a level for each window (the whole song louder or quieter there,
+  // which the mix's own rise and fall looks after) and what is left: how far a stem moves on its own.
+  // Each stem has one say per window, so a part with many cells does not drag the window with it.
+  const stemPart = new Array(m).fill(0), winPart = new Array(wins).fill(0);
+  for (let it = 0; it < 4; it++) {
+    for (const i of all) { const r = lvl[i].flatMap((x, w) => (x == null ? [] : [x - winPart[w]])); stemPart[i] = r.length ? middleOf(r) : 0; }
+    const fit = Array.from({ length: wins }, (_, w) => { const r = all.flatMap((i) => (lvl[i][w] == null ? [] : [lvl[i][w] - stemPart[i]])); return r.length >= 2 ? middleOf(r) : null; });
+    // A window with one stem alone takes the nearest window that has more.
+    for (let w = 0; w < wins; w++) {
+      if (fit[w] != null) { winPart[w] = fit[w]; continue; }
+      let d = 1;
+      while (d < wins && fit[w - d] == null && fit[w + d] == null) d++;
+      winPart[w] = fit[w - d] ?? fit[w + d] ?? 0;
+    }
+  }
+  const heardStems = all.filter((i) => lvl[i].some((x) => x != null));
+  const typical = heardStems.length ? middleOf(heardStems.map((i) => stemPart[i])) : 0;
+  const own = all.map((i) => stemPart[i] - typical);
+  // Each stem against the window as the other stems have it: where few play, its own move would
+  // otherwise count as the whole song moving.
+  const off = all.map((i) => {
+    const others = Array.from({ length: wins }, (_, w) => { const r = all.flatMap((j) => (j === i || lvl[j][w] == null ? [] : [lvl[j][w] - stemPart[j]])); return r.length >= 2 ? middleOf(r) : null; });
+    return lvl[i].map((x, w) => {
+      if (x == null) return null;
+      let d = 0;
+      while (d < wins && others[w - d] == null && others[w + d] == null) d++;
+      return x - stemPart[i] - (others[w - d] ?? others[w + d] ?? winPart[w]);
+    });
+  });
+  const centre = (w) => w * SECTION_STEP + SECTION_WIN / 2;
+  const stretches = (v, from) => {
+    // Middle of three neighbouring windows, so one odd window does not count.
+    const sm = v.map((x, w) => { if (x == null) return null; const near = [v[w - 1], x, v[w + 1]].filter((y) => y != null).map((y) => y - from).sort((a, b) => a - b); return near[near.length >> 1]; });
+    const runs = [];
+    for (let w = 0; w < wins;) {
+      const sign = sm[w] == null || Math.abs(sm[w]) < SECTION_MIN ? 0 : Math.sign(sm[w]);
+      if (!sign) { w++; continue; }
+      let e = w;
+      while (e + 1 < wins && sm[e + 1] != null && Math.abs(sm[e + 1]) >= SECTION_MIN && Math.sign(sm[e + 1]) === sign) e++;
+      if (e - w + 1 >= SECTION_RUN) runs.push([w, e]);
+      w = e + 1;
+    }
+    return { sm, runs };
+  };
+  const curves = off.map((v, i) => {
+    // A part that sits at two levels for about half the song each has its middle between them, and
+    // neither looks far enough off. So once a stretch is found, the part's own level is read again from
+    // the rest of the song, and the stretches from that.
+    let from = 0, { sm, runs } = stretches(v, 0);
+    for (let pass = 0; pass < 3 && runs.length; pass++) {
+      const inRun = new Set(runs.flatMap(([a, b]) => Array.from({ length: b - a + 1 }, (_, k) => a + k)));
+      const rest = v.flatMap((x, w) => (x == null || inRun.has(w) ? [] : [x]));
+      if (rest.length < SECTION_RUN) break;
+      const next = middleOf(rest);
+      if (Math.abs(next - from) < 0.25) break;
+      from = next;
+      ({ sm, runs } = stretches(v, from));
+    }
+    if (!runs.length) return null;
+    const val = new Array(wins).fill(0);
+    for (const [a, b] of runs) for (let w = a; w <= b; w++) val[w] = Math.max(-SECTION_MAX, Math.min(SECTION_MAX, sm[w]));
+    // A point at every window that moves or borders one, so each stretch ramps in and out over a window.
+    const knots = [];
+    for (let w = 0; w < wins; w++) if (val[w] || val[w - 1] || val[w + 1]) knots.push({ t: centre(w), db: val[w] });
+    const moves = runs.map(([a, b]) => {
+      const list = sm.slice(a, b + 1);
+      return { from: centre(a) - SECTION_STEP / 2, to: centre(b) + SECTION_STEP / 2, db: Math.max(-SECTION_MAX, Math.min(SECTION_MAX, list.reduce((p, x) => p + x, 0) / list.length)) };
+    });
+    // One level for the whole of a part that changes lands between its levels, so the rest of the song
+    // moves too: to where the part sits outside the stretches that move.
+    return { base: Math.max(-SECTION_MAX, Math.min(SECTION_MAX, own[i] + from)), knots, moves };
+  });
+  return { curves };
+}
+
+/** A gain curve from points in seconds and dB, straight lines between them and none outside. */
+export function followCurve(chs, sr, knots) {
+  for (let p = 0; p + 1 < knots.length; p++) {
+    const a = knots[p], b = knots[p + 1];
+    if (!a.db && !b.db) continue;
+    const i0 = Math.max(0, Math.round(a.t * sr)), i1 = Math.min(chs[0].length, Math.round(b.t * sr));
+    const len = Math.max(1, Math.round((b.t - a.t) * sr));
+    for (let i = i0; i < i1; i++) {
+      const d = a.db + ((b.db - a.db) * (i - Math.round(a.t * sr))) / len;
+      const k = Math.pow(10, d / 20);
+      for (const ch of chs) ch[i] *= k;
+    }
+  }
 }

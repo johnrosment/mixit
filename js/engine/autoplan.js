@@ -7,19 +7,19 @@
 
 import { measureLoudness, truePeak, integratedLufs } from './loudness.js';
 import { ltas, bandLevels } from './spectral.js';
-import { measureStem, autoMixSliders } from './automix.js';
-import { stemMap, MAP_BANDS, mapHop, waveStep, waveCopy, readStemLevels, roughFeatures, stemFeatures, addFeatures, fitBalance, roughBelongs } from './roughmix.js';
+import { measureStem, autoMixSliders, leadOf } from './automix.js';
+import { stemMap, MAP_BANDS, mapHop, waveStep, waveCopy, roughCopy, readStemLevels, roughFeatures, stemFeatures, addFeatures, fitBalance, roughBelongs } from './roughmix.js';
 
 export { stemMap };
 
-// Set safely under seven songs at their real balance, as moving a good balance
+// Set safely under nine songs at their real balance, as moving a good balance
 // does more harm than missing a bad one. Those songs are the only evidence so far.
 export const GOALS = {
   heardShared: 0.3,   // the least of a part that comes through the rest, shared out as parts are added
                       // (quietest part with two to four parts: 26% to 47%; seven parts: 12%; six parts, one a quiet layer: 6%)
-  heardVoice: 0.35,   // a lead voice carries the song (not yet checked on a real one)
+  heardVoice: 0.25,   // the main voice carries the song (two real ones against their masters: 34% and 55%)
   heardQuiet: 0.05,   // effects and ambience are meant to sit under
-  swamp: { 2: 0.75, 3: 0.7, more: 0.55 }, // the most of the loudness one part may hold (two parts: 67%, three: 38% and 64%, four or more: 36% to 45%)
+  swamp: { 2: 0.75, 3: 0.7, more: 0.65 }, // the most of the loudness one part may hold (two parts: 67%, three: 38% and 64%, four or more: 36% to 58%)
   holds: 0.6,         // shared out among up to four parts: the least of the loudness a melodic part or voice holds while it plays
                       // (two parts: 33%, three: 35%, four: 22%). Not bass or drums: one song's bass holds 6% and sounds right there.
   buildUp: 7,         // dB one octave from 125 Hz to 1 kHz may stand over its neighbours (songs: up to 6.8)
@@ -126,8 +126,17 @@ export function measureWhole(chs, sr) {
 
 const plainName = (name) => name.replace(/\.[^.]+$/, '').replace(/^(.+?)\1(_\d+)?$/, '$1$2');
 const isQuiet = (r) => r.category === 'fx' || r.category === 'ambience';
-const heardGoal = (row, parts) => {
-  if (row.category === 'vocals' && row.role === 'lead') return GOALS.heardVoice;
+// Only one voice has to carry the song. Other vocal stems are layers, and raising each one to carry it
+// covers the others, so they all climb. (Two real songs: up to +12 dB on parts their masters keep low.)
+// A stem named as the lead stays the main voice even when it arrives quieter than a layer.
+const mainVoice = (rows) => {
+  const live = rows.filter((r) => r.m.lufs > -70);
+  const named = live.filter((r) => r.category === 'vocals' && r.role === 'lead' && /lead|main/i.test(r.name || ''));
+  const v = leadOf(named.length ? named : live);
+  return v?.role === 'lead' ? v : null;
+};
+const heardGoal = (row, parts, voice) => {
+  if (row === voice) return GOALS.heardVoice;
   if (isQuiet(row)) return GOALS.heardQuiet;
   return GOALS.heardShared / Math.max(2, parts);
 };
@@ -159,7 +168,7 @@ function solveHeard(rows, maps, gains, cuts, start) {
   const m = rows.length, up = Float64Array.from(gains);
   const live = rows.map((r) => r.m.lufs > -70);
   const parts = live.filter(Boolean).length;
-  const heard = rows.map((r) => heardGoal(r, parts)), holds = holdsGoals(rows, parts);
+  const voice = mainVoice(rows), heard = rows.map((r) => heardGoal(r, parts, voice)), holds = holdsGoals(rows, parts);
   for (let step = 0; step < 2 * MOVE_UP * m; step++) {
     const s = scoreParts(maps, up, cuts);
     let worst = -1, gap = 1;
@@ -249,7 +258,7 @@ export class AutoSession {
 
   /** The rough mix, if there is one. Whether it is used is decided in plan(). */
   setRough(audio) {
-    this.roughWave = waveCopy(audio.channels, this.waveStep, this.n);
+    this.roughWave = roughCopy(audio.channels, this.waveStep, this.n);
     this.roughFeat = roughFeatures(audio.channels, this.sr);
   }
 
@@ -275,7 +284,7 @@ export class AutoSession {
     // Your rough mix decides the balance and tone, so only the whole is scored.
     if (rough) {
       const { sliders, reasons } = autoMixSliders(rows, { rough: true });
-      return { sliders, reasons, stems: rows.map((r) => ({ gainDb: 0, cuts: [], ...heldComp(r) })), board, hold: true };
+      return { sliders, reasons, stems: rows.map((r) => ({ gainDb: 0, cuts: [], ...heldComp(r) })), board, hold: true, rough: true };
     }
 
     const parts = rows.filter((r) => r.m.lufs > -70).length;
@@ -290,7 +299,7 @@ export class AutoSession {
     const names = meta.map((x) => plainName(x.name));
 
     const said = [];
-    if (offered) said.push('Your rough mix did not line up with these stems, so it was set aside and the mix was planned from the stems alone. Check that it is a bounce of the same song from the same starting point.');
+    if (offered) said.push('Your rough mix did not line up with these stems, so it was set aside and the mix was planned from the stems alone. Check that it is a bounce of the same song.');
     cuts.forEach((c, i) => { if (c.length) said.push(`Too much builds up around ${c[0].freq} Hz, mostly from ${names[i]}, so it is cut ${(-c[0].gain).toFixed(1)} dB there.`); });
     let anyMove = false;
     move.forEach((v, i) => {
@@ -309,7 +318,7 @@ export class AutoSession {
     const unmoved = !anyMove && !cuts.some((c) => c.length) && !sliders.highs;
     if (unmoved) said.push('Played together, your stems already meet the balance and tone goals, so each one stays at its level.');
 
-    const heardGoals = rows.map((r) => heardGoal(r, parts)), holds = holdsGoals(rows, parts);
+    const voice = mainVoice(rows), heardGoals = rows.map((r) => heardGoal(r, parts, voice)), holds = holdsGoals(rows, parts);
     const lo0 = lowest(first.heard, heardGoals), lo1 = lowest(last.heard, heardGoals);
     if (lo0 >= 0 && lo1 >= 0) {
       const part = (values, goals, at) => ({ name: names[at], value: values[at], goal: goals[at] });

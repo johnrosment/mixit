@@ -12,7 +12,7 @@ import { finalize } from './master.js';
 import { bedFromBuses, loudnessWeights, channelLevels } from './spatial.js';
 import { tuneVocal, SCALES } from './pitch.js';
 import { detectSections, sectionMoves, sectionCurve } from './sections.js';
-import { roughFeatures, stemFeatures, addFeatures, fitBalance, roughBelongs, waveStep, waveCopy, readStemLevels } from './roughmix.js';
+import { roughFeatures, stemFeatures, addFeatures, fitBalance, roughBelongs, waveStep, waveCopy, roughCopy, readStemLevels, sectionLevels, followCurve } from './roughmix.js';
 import { lowCutFreq, resonantCuts, buildUpCuts } from './stemtools.js';
 import { levelSpeech, duckUnderSpeech, deliveryCheck, fadeEdits, mouthDeclick, rotatePhase, shareMics, dialogueLoudness, FRAME_RATES, DELIVERY } from './post.js';
 import { denoise, detectClicks, repairClicks, detectHumInPauses, removeHum } from './repair.js';
@@ -110,6 +110,39 @@ function stats(arr) {
   return { maxGr: -min, avgGr: -sum / arr.length, activePct: (100 * active) / arr.length };
 }
 
+// A part's level over a few seconds: K-weighted energy per 0.1 s, averaged over 3 s.
+const SLOW_HOP = 0.1, SLOW_SPAN = 3, SLOW_MAX = 12;
+function slowLevel(chs, sr) {
+  const { energy, hop } = hopEnergies(chs, sr, SLOW_HOP);
+  const H = energy.length, half = Math.round(SLOW_SPAN / SLOW_HOP / 2), sum = new Float64Array(H + 1);
+  for (let h = 0; h < H; h++) sum[h + 1] = sum[h] + energy[h];
+  return { hop, level: Float64Array.from({ length: H }, (_, h) => { const a = Math.max(0, h - half), b = Math.min(H, h + half + 1); return (sum[b] - sum[a]) / (b - a); }) };
+}
+/** Brings a part back to the slow level it had, straight lines between hops. Returns the largest move in dB. */
+function keepSlowLevel(chs, sr, before) {
+  const after = slowLevel(chs, sr), H = before.level.length, hop = before.hop;
+  let top = 0;
+  for (const v of before.level) if (v > top) top = v;
+  if (top <= 0) return 0;
+  const floor = 1e-6 * top;
+  let most = 0;
+  const k = Float64Array.from({ length: H }, (_, h) => {
+    const db = Math.max(-SLOW_MAX, Math.min(SLOW_MAX, 10 * Math.log10((before.level[h] + floor) / (after.level[h] + floor))));
+    if (before.level[h] > 1e-3 * top) most = Math.max(most, Math.abs(db));
+    return Math.pow(10, db / 20);
+  });
+  const n = chs[0].length;
+  for (let h = 0; h < H; h++) {
+    const a = h * hop + hop / 2, ka = k[h], kb = k[Math.min(H - 1, h + 1)];
+    const i0 = h === 0 ? 0 : Math.round(a), i1 = h === H - 1 ? n : Math.round(a + hop);
+    for (let i = i0; i < Math.min(n, i1); i++) {
+      const g = i < a ? ka : ka + ((kb - ka) * (i - a)) / hop;
+      for (const ch of chs) ch[i] *= g;
+    }
+  }
+  return most;
+}
+
 // The bus a stem counts toward when matching your rough mix.
 const roughBusOf = (st) => (st.category in BUS_TARGETS ? st.category : 'music');
 
@@ -141,7 +174,7 @@ export class MixSession {
     const readStems = this.s.autoBalance !== false && heard.length > 1 ? heard : [];
     if (readStems.length) {
       this.waveStep = waveStep(this.sr, this.n, readStems.length);
-      this.roughWave = waveCopy(audio.channels, this.waveStep, this.n);
+      this.roughWave = roughCopy(audio.channels, this.waveStep, this.n);
       this.stemWaves = {};
       this.stemsToRead = readStems;
     }
@@ -157,13 +190,21 @@ export class MixSession {
   fitRoughStems() {
     const read = this.stemsToRead;
     const fit = readStemLevels(read.map((i) => this.stemWaves[i]), this.roughWave, this.sr / this.waveStep);
-    this.stemWaves = this.roughWave = null;
     this.stemsUnread = !fit;
-    if (!fit) return { read: false };
-    const found = fit.db.filter((v) => v != null);
-    if (!found.length) { this.stemsUnread = true; return { read: false }; }
+    const found = fit ? fit.db.filter((v) => v != null) : [];
+    if (fit && !found.length) this.stemsUnread = true;
+    if (!fit || !found.length) { this.stemWaves = this.roughWave = null; return { read: false }; }
     const top = Math.max(...found);
-    const levels = read.map((i, j) => ({ i, db: fit.db[j] == null ? null : Math.max(fit.db[j], top + ROUGH_LEFT_OUT_DB) }));
+    const whole = read.map((i, j) => (fit.db[j] == null ? null : Math.max(fit.db[j], top + ROUGH_LEFT_OUT_DB)));
+    // A voice that gets matched to the others afterwards does not keep this level, so it is not listed.
+    const matched = (st) => this.s.mode === 'post' && st.category === 'vocals' && this.s.matchVoices !== false;
+    // Where a part's level changes along the song in it, the stem follows those changes too.
+    // (Not when the stems are only part of the song: what is missing would be taken for them.)
+    const along = fit.partial ? null : sectionLevels(read.map((i) => this.stemWaves[i]), this.roughWave, this.sr / this.waveStep, fit.lag, whole);
+    this.stemWaves = this.roughWave = null;
+    this.stemCurves = {};
+    read.forEach((i, j) => { const c = along?.curves[j]; if (c && whole[j] != null && !matched(this.s.stems[i])) this.stemCurves[i] = c; });
+    const levels = read.map((i, j) => ({ i, db: whole[j] == null ? null : whole[j] + (this.stemCurves[i]?.base || 0) }));
     const busDb = {};
     for (const { i, db } of levels) {
       if (db == null) continue;
@@ -172,9 +213,9 @@ export class MixSession {
     }
     this.stemGains = {};
     for (const { i, db } of levels) if (db != null) this.stemGains[i] = db - busDb[roughBusOf(this.s.stems[i])];
-    // A voice that gets matched to the others afterwards does not keep this level, so it is not listed.
-    const matched = (st) => this.s.mode === 'post' && st.category === 'vocals' && this.s.matchVoices !== false;
-    const stems = levels.filter(({ i, db }) => db != null && !matched(this.s.stems[i])).map(({ i, db }) => ({ name: this.s.stems[i].name, db: db - top }));
+    // Shown against the middle stem, so one that stands out doesn't make all the others look turned down.
+    const middle = [...found].sort((a, b) => a - b)[Math.floor(found.length / 2)];
+    const stems = levels.filter(({ i, db }) => db != null && !matched(this.s.stems[i])).map(({ i, db }) => ({ name: this.s.stems[i].name, db: db - middle, ...(this.stemCurves[i] ? { moves: this.stemCurves[i].moves } : {}) }));
     this.stemFit = { busDb, offsetSec: fit.offsetSec, share: fit.share, method: fit.method, partial: !!fit.partial, stems };
     return { read: true, stems, share: fit.share, method: fit.method };
   }
@@ -241,19 +282,28 @@ export class MixSession {
     const fromRough = this.stemGains?.[index] || 0;
     gain(chs, (st.gain || 0) + fromRough);
     if (fromRough) row.steps.push(`Level from your rough mix: ${fmt(fromRough)} dB`);
+    // Where the part's level changes along the song in your rough mix, the stem follows. The moves go on
+    // at the end of its chain, like a fader ridden after the compressor, which would otherwise even them
+    // out; everything measured here as the stem comes in already has them.
+    const along = audible ? this.stemCurves?.[index] : null;
+    const asSet = along ? chs.map((c) => new Float32Array(c)) : chs;
+    if (along) {
+      followCurve(asSet, sr, along.knots);
+      row.steps.push(`Follows your rough mix along the song: ${along.moves.map((v) => `${fmt(v.db)} dB from ${fmtTime(v.from)} to ${fmtTime(v.to)}`).join(', ')}`);
+    }
     // Unprocessed levels per bus for matching your rough mix (after your stem gain).
-    if (this.rough && audible) { const k = roughBusOf(st); this.roughBus[k] = addFeatures(this.roughBus[k], stemFeatures(chs, sr)); }
+    if (this.rough && audible) { const k = roughBusOf(st); this.roughBus[k] = addFeatures(this.roughBus[k], stemFeatures(asSet, sr)); }
     // Auto mix keeps each bus at the level it comes in at, plan's moves included.
     if (this.s.autoHold && audible) {
-      const k = roughBusOf(st), h = hopEnergies(chs, sr);
+      const k = roughBusOf(st), h = hopEnergies(asSet, sr);
       this.holdBus ||= {};
       if (this.holdBus[k]) h.energy.forEach((e, j) => { this.holdBus[k].energy[j] += e; });
       else this.holdBus[k] = { energy: Float64Array.from(h.energy), hop: h.hop };
-      if (k === 'drums') addInto(this.heldDrums ||= stereoBuf(n), chs, 1);
+      if (k === 'drums') addInto(this.heldDrums ||= stereoBuf(n), asSet, 1);
       // (With the plan's cuts in, so holding the tone does not take them back out.)
       this.heldSum ||= stereoBuf(n);
-      const cuts = st.autoCuts?.length ? chs.map((c) => new Float32Array(c)) : chs;
-      if (cuts !== chs) toneEq(cuts, sr, { extra: st.autoCuts });
+      const cuts = st.autoCuts?.length && asSet === chs ? chs.map((c) => new Float32Array(c)) : asSet;
+      if (st.autoCuts?.length) toneEq(cuts, sr, { extra: st.autoCuts });
       addInto(this.heldSum, cuts, 1);
     }
     // High-pass everything but kick and bass: raised to just under where the
@@ -279,6 +329,11 @@ export class MixSession {
       const d = deess(chs, sr, { amount: 0.35, split: 6000 });
       row.steps.push(`Cymbal harshness tamed: active ${d.activePct.toFixed(1)}%, max ${d.maxGr.toFixed(1)} dB above 6 kHz`);
     }
+    // Auto mix keeps how loud each part is from one section to the next: its compressor still evens out
+    // notes and words, but measured over a few seconds the part comes out as loud as it went in. (Set
+    // from the whole stem, a compressor works harder on the loud sections, and the quiet ones climb.)
+    let slowIn = null;
+    const holdSlow = () => { if (!slowIn && this.s.autoHold && !post && audible && st.comp > 0.01) slowIn = slowLevel(chs, sr); };
     if (st.category === 'vocals' && audible) {
       // Narrow cuts where the voice sounds boxy (400-800 Hz) or nasal (2-4 kHz).
       const cuts = this.s.flat ? [] : resonantCuts(chs, sr, [[400, 800, 'boxy'], [2000, 4000, 'nasal']], { minDb: 4, maxCut: 2.5, q: 4, trendBands: 4 });
@@ -293,6 +348,7 @@ export class MixSession {
       }
       // Soft limiter catches the highest peaks first, so the compressor can stay gentle.
       if (st.comp > 0.01) {
+        holdSlow();
         const l = compress(chs, sr, { ratio: 10, attack: 1, release: 60, knee: 8, rmsMs: 0, thresholdPct: 0.985, thresholdOffset: 0, makeup: 0, maxGr: 6 });
         row.steps.push(`Peak limiter on the loudest notes: max ${l.maxGr.toFixed(1)} dB`);
       }
@@ -300,7 +356,8 @@ export class MixSession {
     if (st.comp > 0.01) {
       // A music stem keeps its level: a sparse part would otherwise lose more
       // than a steady pad and slip back in your balance.
-      const keepLufs = st.category === 'music' ? integratedLufs(chs, sr) : -Infinity;
+      holdSlow();
+      const keepLufs = !slowIn && st.category === 'music' ? integratedLufs(chs, sr) : -Infinity;
       const c = compress(chs, sr, compSettings(st));
       if (keepLufs > -70) gain(chs, keepLufs - integratedLufs(chs, sr));
       row.comp = { ...c, curve: undefined };
@@ -310,6 +367,10 @@ export class MixSession {
       // Light tape saturation on top for character.
       saturate(chs, sr, { drive: 3, mode: 'tape', mix: 0.3 });
       row.steps.push('Light tape saturation (30% blend)');
+    }
+    if (slowIn) {
+      const moved = keepSlowLevel(chs, sr, slowIn);
+      if (moved > 0.5) row.steps.push(`Section levels kept through the compressor (up to ${moved.toFixed(1)} dB back)`);
     }
     if ((st.width ?? 1) !== 1 || st.monoBass) {
       width(chs, { amount: st.width ?? 1, monoHz: st.monoBass ? 120 : 0, sr });
@@ -321,6 +382,7 @@ export class MixSession {
       const l = integratedLufs(chs, sr);
       if (l > -70) { gain(chs, VOICE_LUFS - l); row.steps.push(`Voice matched to ${VOICE_LUFS} LUFS (${fmt(VOICE_LUFS - l)} dB)`); }
     }
+    if (along) followCurve(chs, sr, along.knots);
     row.processedLufs = integratedLufs(chs, sr);
     if (audible) {
       let bus = st.category;
@@ -400,7 +462,7 @@ export class MixSession {
     let rough = null;
     if (this.rough && !roughOk) {
       rough = { ...(roughFit || {}), rejected: true };
-      log.push(`Your rough mix did not line up with these stems${roughFit ? ` (level error ${roughFit.errDb.toFixed(1)} dB)` : ''}, so it was not used. Check that it is a bounce of the same song from the same start point.`);
+      log.push(`Your rough mix did not line up with these stems${roughFit ? ` (level error ${roughFit.errDb.toFixed(1)} dB)` : ''}, so it was not used. Check that it is a bounce of the same song.`);
     } else if (balance && this.rough) {
       progress('Matching your rough mix', 0.1);
       const fit = roughFit;
