@@ -502,8 +502,9 @@ export function master(audio, settings, { references = [], profile = null, deliv
     if (soundMode) return finalizeByPeak(os === 2 ? chs.map(downsample2) : chs, sr, vs);
     const f = finalize(chs, wsr, vs, cache);
     if (os === 1) return f;
-    const g = finalize(f.chs.map(downsample2), sr, vs);
-    return { ...g, gainDb: f.gainDb + g.gainDb, iterations: f.iterations, convertGrDb: g.limiter.maxGr, limiter: { ...f.limiter, maxGr: Math.max(f.limiter.maxGr, g.limiter.maxGr) } };
+    // The pass after converting back only catches overshoot, at the loudness the first pass settled on.
+    const g = finalize(f.chs.map(downsample2), sr, { ...vs, targetLufs: vs.maxGr != null ? f.achievedLufs : vs.targetLufs, maxGr: null, minLufs: null });
+    return { ...g, gainDb: f.gainDb + g.gainDb, iterations: f.iterations, convertGrDb: g.limiter.maxGr, limiter: { ...f.limiter, maxGr: Math.max(f.limiter.maxGr, g.limiter.maxGr) }, limitedBy: f.limitedBy };
   };
 
   const chain = processChain(work, wsr, s, { profile, progress, inputAnalysis: chainAnalysis });
@@ -514,7 +515,12 @@ export function master(audio, settings, { references = [], profile = null, deliv
   if (os === 2) chain.stages.unshift({ stage: 'Oversampled processing', detail: `Every stage below ran at ${(wsr / 1000).toFixed(1)} kHz (2x the source), so saturation, fast dynamics and the limiter create less aliasing. Converted with a ${HALF_BAND.taps}-tap linear-phase half-band filter (flat to ${(HALF_BAND.passband * sr / 1000).toFixed(1)} kHz, about 100 dB rejection above).` });
   progress('Loudness and true-peak limiting', 0.82);
   const finCache = {};
-  const fin = finalizeOut(chain.chs, s, finCache);
+  // With `limitMaxGr`, the master keeps its peaks: the limiter only catches the highest of them, and a
+  // dense song lands a little under the target rather than flattened (never under `limitFloorLufs`).
+  // Only the main master: the extra versions below are made at the loudness they ask for.
+  const keepPeaks = !soundMode && s.limitMaxGr != null;
+  const fin = finalizeOut(chain.chs, keepPeaks ? { ...s, maxGr: s.limitMaxGr, minLufs: s.limitFloorLufs ?? null } : s, finCache);
+  const limitedBy = fin.limitedBy || 0;
   chain.stages.push({
     stage: 'Loudness + limiter',
     detail: `Gain ${fmt(fin.gainDb)} dB into a true-peak limiter (ceiling ${s.ceiling} dBTP, ${s.lookahead} ms look-ahead, ${s.release} ms release that adapts: quicker after short peaks, slower when limiting is held). Reached ${fin.achievedLufs.toFixed(2)} LUFS at ${fin.truePeakDbtp.toFixed(2)} dBTP in ${fin.iterations} pass(es). Limiter: avg ${fin.limiter.avgGr.toFixed(2)} dB, max ${fin.limiter.maxGr.toFixed(1)} dB, active ${fin.limiter.activePct.toFixed(1)}% of the time.${os === 2 ? ` After converting back to ${(sr / 1000).toFixed(1)} kHz, a final pass caught up to ${fin.convertGrDb.toFixed(2)} dB of conversion overshoot.` : ''}`,
@@ -530,7 +536,8 @@ export function master(audio, settings, { references = [], profile = null, deliv
     const at = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
     warnings.push(`${outliers.length === 1 ? 'One hit' : `${outliers.length} hits`} (at ${outliers.map((o) => at(o.t)).join(', ')}) ${outliers.length === 1 ? 'stands' : 'stand'} up to ${Math.max(...outliers.map((o) => o.overDb)).toFixed(0)} dB above everything else in the song. The limiter catches ${outliers.length === 1 ? 'it' : 'them'}, but it may be worth a listen in the mix.`);
   }
-  if (!soundMode && Math.abs(fin.achievedLufs - s.targetLufs) > 0.5) warnings.push(`Target ${s.targetLufs} LUFS could not be reached exactly (got ${fin.achievedLufs.toFixed(2)} LUFS).`);
+  if (!soundMode && limitedBy > 0.1) chain.stages[chain.stages.length - 1].detail += ` Reaching ${s.targetLufs} LUFS would have flattened the peaks, so the master stays ${limitedBy.toFixed(1)} dB under it.`;
+  else if (!soundMode && Math.abs(fin.achievedLufs - s.targetLufs) > 0.5) warnings.push(`Target ${s.targetLufs} LUFS could not be reached exactly (got ${fin.achievedLufs.toFixed(2)} LUFS).`);
   const silentRefs = references.length - learnedRefs;
   if (silentRefs > 0) warnings.push(`${silentRefs === 1 ? 'One reference file has' : `${silentRefs} reference files have`} no sound in ${silentRefs === 1 ? 'it' : 'them'}, so ${silentRefs === 1 ? 'it was' : 'they were'} left out.`);
   if (s.refStrength > 0.01 && chain.refInfo?.differenceDb > REF_FAR_DB) warnings.push(`This reference is very different from your song (up to ${Math.round(chain.refInfo.differenceDb)} dB in places), so it only nudges the tone. A song in a similar style will work better.`);
@@ -567,7 +574,7 @@ export function master(audio, settings, { references = [], profile = null, deliv
     const m = new Float32Array(L.length);
     for (let i = 0; i < m.length; i++) m[i] = 0.5 * (L[i] + R[i]);
     // Loudness is matched as dual-mono, i.e. as heard on two speakers.
-    const f = finalizeOut([m, m], s);
+    const f = finalizeOut([m, m], keepPeaks ? { ...s, targetLufs: fin.achievedLufs } : s);
     extras.push({ kind: 'mono', key: 'mono', label: 'Mono / radio', chs: [f.chs[0]], lufs: f.achievedLufs, dbtp: f.truePeakDbtp, maxGr: f.limiter.maxGr });
   }
   if (deliverables.vinyl) {
@@ -612,6 +619,7 @@ export function master(audio, settings, { references = [], profile = null, deliv
       repairs: chain.repairs,
       resonance: chain.resonanceReport,
       curves: { ...chain.curves, limiter: fin.limiter.curve, stepSec: fin.limiter.curveStepSec },
+      limitedBy,
       playbackNormalisation: playback,
       timing: { seconds: (performance.now() - t0) / 1000 },
     },

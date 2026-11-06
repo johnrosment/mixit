@@ -73,7 +73,7 @@ settings and presets are kept only in your browser.
 - Works best in a current desktop browser: Chrome, Edge, Safari or Firefox.
 - Keep the MIXIT tab in front while it works; browsers slow down tabs in the background.
 - A four-minute song needs roughly 0.5–1 GB of memory while it renders.
-- Easy Mix delivers at streaming volume (-14 LUFS) and keeps the song's peaks: the limiter only catches the highest of them, so a dense song may land a little quieter. Easy Master delivers at -12 LUFS with a safe peak level.
+- Easy Mix and Easy Master deliver at streaming volume (-14 LUFS, peaks at -1 dBTP) and keep the song's peaks: the limiter only catches the highest of them, so a dense song may land a little quieter (never under -16 LUFS). Advanced masters to whatever loudness you set.
 
 ## Credits
 

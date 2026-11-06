@@ -165,7 +165,12 @@ const SCHEMA = [
 ];
 
 // ---- Easy page: eight plain sliders mapped onto the full chain ----
-const EASY_LUFS = -12;
+// Streaming volume, peaks at -1 dBTP. The limiter only catches the highest peaks (EASY_LIMIT_DB at
+// most, and rarely on held parts), so a dense or very peaky song lands a little quieter instead of
+// flattened, never under EASY_FLOOR_LUFS.
+const EASY_LUFS = -14;
+const EASY_LIMIT_DB = 6;
+const EASY_FLOOR_LUFS = -16;
 const EASY_DEFAULTS = { lows: 0, highs: 0, punch: 0.5, width: 0.5, clean: 0.3, verb: 0, tape: 0, hiss: 0 };
 // Where each slider changes nothing: the middle, or off.
 const EASY_NEUTRAL = { lows: 0, highs: 0, punch: 0.5, width: 0.5, clean: 0, verb: 0, tape: 0, hiss: 0 };
@@ -196,8 +201,7 @@ function easyMasterValues(e) {
   // Clean-up off means off: no smoothing, and no automatic cuts in its place.
   if (e.clean < 0.01) Object.assign(set, { resonance: 0, deMud: 0, nasalCut: 0, harshCut: 0 });
   if (e.tape > 0.01) { set.saturation = q(5 * e.tape, 0.5); set.satMode = 'tape'; }
-  // -2 dBTP: Spotify's advice for anything louder than -14 LUFS.
-  return { values: { ...MASTER_DEFAULTS, ...set, targetLufs: EASY_LUFS, ceiling: -2 }, locked: Object.keys(set) };
+  return { values: { ...MASTER_DEFAULTS, ...set, targetLufs: EASY_LUFS, ceiling: -1, limitMaxGr: EASY_LIMIT_DB, limitFloorLufs: EASY_FLOOR_LUFS }, locked: Object.keys(set) };
 }
 
 const STATE_KEY = 'mixit.master.v1';
@@ -422,6 +426,8 @@ export function initMaster({ engine, onMode }) {
     for (const k of Object.keys(MASTER_DEFAULTS)) if (!OUTPUT_ONLY.includes(k)) s[k] = v[k];
     if (job.profile === 'auto') { s.auto = true; s.locked = job.locked; }
     if (v.delivery === 'sound') s.soundMode = true;
+    // Easy keeps the song's peaks (see easyMasterValues); Advanced masters to the loudness you set.
+    if (job.mode === 'easy') { s.limitMaxGr = v.limitMaxGr ?? null; s.limitFloorLufs = v.limitFloorLufs ?? null; }
     return s;
   }
 
@@ -457,7 +463,9 @@ export function initMaster({ engine, onMode }) {
   function autoValues(auto, job) {
     const m = easyMasterValues(auto.sliders);
     const keep = job.mode === 'advanced' ? Object.fromEntries(OUTPUT_KEYS.map((k) => [k, job.values[k]])) : null;
-    return { values: { ...m.values, ...auto.extra, ...keep }, locked: [...m.locked, ...Object.keys(auto.extra)] };
+    // (Advanced keeps your own loudness and limiter, so the Easy output rules stay behind.)
+    const { limitMaxGr, limitFloorLufs, ...shared } = m.values;
+    return { values: { ...(keep ? shared : m.values), ...auto.extra, ...keep }, locked: [...m.locked, ...Object.keys(auto.extra)] };
   }
   // Listen to each song, set the controls from what is heard, then master. Each song in a batch gets its own.
   async function autoMaster(mode) {
@@ -544,7 +552,7 @@ export function initMaster({ engine, onMode }) {
           }
         }
         const auto = job.autoFor?.get(entry);
-        const settings = auto ? engineSettings({ ...autoValues(auto, job), profile: 'auto' })
+        const settings = auto ? engineSettings({ ...autoValues(auto, job), profile: 'auto', mode: job.mode })
           : trims ? { ...baseSettings, tiltTrim: trims[i].tiltTrim, widthTrim: trims[i].widthTrim } : baseSettings;
         const t0 = performance.now();
         const res = await engine.run('master', { track: track.payload, references, profile: saved, settings, deliverables }, transfer,
@@ -863,7 +871,7 @@ export function initMaster({ engine, onMode }) {
         for (const x of state.results) for (const file of await fileSet(x).packageFiles(full())) files.push({ ...file, name: `${x.base}/${file.name}` });
         download(makeZip(files), 'masters_all.zip');
       } },
-      { label: `Master ${ext}`, sub: `${fx(f.lo.lufs, 1)} LUFS · ${fx(f.lo.dbtp, 1)} dBTP`, easy: true, run: save(f.masterFile, f.mime) },
+      { label: `Master ${ext}`, sub: `${fx(f.lo.lufs, 1)} LUFS · ${fx(f.lo.dbtp, 1)} dBTP${(r.report.limitedBy || 0) > 0.1 ? ' · a little under streaming volume so its peaks are not flattened' : ''}`, easy: true, run: save(f.masterFile, f.mime) },
       mp3Item(r.master, f.mp3File),
       ...(r.video ? [{ label: 'Video with this sound', sub: 'picture untouched · AAC sound', easy: true, run: async () => download(await replaceVideoSound(r.video, r.master, { peakDbtp: f.lo.dbtp }), videoOutName(r.name, 'master')) }] : []),
       { label: 'CD-quality WAV', sub: '16-bit, 44.1 kHz', easy: true, run: save(f.cdFile, 'audio/wav') },
