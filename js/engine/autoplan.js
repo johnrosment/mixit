@@ -26,6 +26,8 @@ export const GOALS = {
   tilt: [-10, -1],    // dB per octave from 250 Hz to 4 kHz (songs: -8.7 to -2.0)
   shape: 0.7,         // how much of the stems' loudness range the mix keeps (songs: 78% to 99%)
   mono: 3,            // LU lost when played in mono
+  air: -12,           // dB the 8 kHz octave sits under 1 to 4 kHz, songs with drums or a voice
+                      // (four finished pop masters: -5.8 to -11.6; dark cinematic songs: -16.6 to -22.7)
 };
 const MOVE_UP = 12;   // dB a covered stem may come up
 const MOVE_DOWN = 12; // dB a stem that swamps the rest may come down
@@ -35,7 +37,7 @@ const CUT_HOLDS = 0.25; // the least of that octave a stem must hold to be cut
 const CUT_Q = 1.4;    // about an octave wide
 const CUT_AIM = 0.25; // dB under the goal to aim for, as the finished mix lands a little either side of the plan
 const HIGHS_MAX = 0.5; // the Highs slider: 1 dB at most
-const FINISHED = { lufs: -12, ceiling: -2 }; // where Easy finishes, for showing the limiter's work
+const FINISHED = { lufs: -14, ceiling: -1 }; // where Easy finishes, for showing the limiter's work
 
 const dB = (p) => 10 * Math.log10(p + 1e-20);
 const CENTERS = MAP_BANDS;
@@ -315,6 +317,13 @@ export class AutoSession {
     const tilt = tiltOf(whole.levels.map((v, i) => v + now[i] - start[i]));
     if (tilt < lo) { sliders.highs = Math.min(HIGHS_MAX, Math.round((lo - tilt) * 10) / 20 + 0.1); said.push('The stems together are darker than finished songs, so the highs come up a little.'); }
     else if (tilt > hi) { sliders.highs = -Math.min(HIGHS_MAX, Math.round((tilt - hi) * 10) / 20 + 0.1); said.push('The stems together are brighter than finished songs, so the highs come down a little.'); }
+    else if (rows.some((r) => r.m.lufs > -70 && (r.category === 'drums' || r.category === 'vocals'))) {
+      // Hats, snaps and voices want a clear top. Where the very top sits well under the songs we have,
+      // it comes up a little (half a dB for each 3 dB short, 1 dB at most).
+      const levels = whole.levels.map((v, i) => v + now[i] - start[i]);
+      const air = levels[7] - (levels[4] + levels[5] + levels[6]) / 3;
+      if (air < GOALS.air) { sliders.highs = Math.min(HIGHS_MAX, Math.round(((GOALS.air - air) / 3) * 4) / 8 + 0.125); said.push('The very top is a little dull for a song with drums or a voice, so the highs come up a little.'); }
+    }
     const unmoved = !anyMove && !cuts.some((c) => c.length) && !sliders.highs;
     if (unmoved) said.push('Played together, your stems already meet the balance and tone goals, so each one stays at its level.');
 
@@ -368,6 +377,13 @@ export function scoreCard(board, whole, report) {
   const range = report.heldRange ?? board.rangeStems;
   out.push(row('Quiet and loud parts keep their shape', `at least ${Math.round(GOALS.shape * 100)}% of the stems’ range`, `${range.toFixed(1)} LU`, `${whole.lra.toFixed(1)} LU`, r1(whole.lra) >= r1(GOALS.shape * range)));
   out.push(row('Holds up in mono', `loses at most ${GOALS.mono} LU`, `${board.before.mono.toFixed(1)} LU`, `${whole.monoLoss.toFixed(1)} LU`, r1(whole.monoLoss) <= GOALS.mono));
+  // Each group against the others, section by section, against how it came in (with your rough mix's moves).
+  const bal = report.sectionBalance;
+  if (bal?.last) {
+    const clock = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
+    const said = (x) => `${x.db > 0 ? '+' : ''}${x.db.toFixed(1)} dB, ${x.key} at ${clock(x.at)}`;
+    out.push(row('Every section keeps its balance', `each group within ${bal.tol} dB of how it came in, against the other parts`, bal.fixed.length ? `${said(bal.first)} before the check` : 'as they came in', said(bal.last), r1(Math.abs(bal.last.db)) <= bal.tol));
+  }
   // Not a goal: stems that are already loud need this much at the finished level however well they are mixed.
   out.push(row('Limiter at the finished level', 'Not a goal, shown so you can see its work.', db1(board.before.limiter), db1(report.limiter?.maxGr ?? 0), null));
   return out;

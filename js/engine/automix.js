@@ -114,14 +114,16 @@ export function autoMixSliders(rows, { rough = false, moved = false } = {}) {
     if (drums.m.crest < 12) { e.punch = 0.65; reasons.push('The drums are already squashed, so they get a little more punch.'); }
     reasons.push('The drums keep the dynamics they came in with, so the limiter has less to do.');
   }
-  // Space: the voice decides if there is one; otherwise how wide the instruments already are.
+  // Space: one shared room blends the parts into one song. It comes down where the stems are already
+  // wide and spacious (the voice decides if there is one), but a song always gets some.
   if (lead) {
-    if (lead.m.correlation < 0.75) { e.verb = 0.15; reasons.push('The voice already has its own space, so reverb stays low.'); }
+    if (lead.m.correlation < 0.75) { e.verb = 0.3; reasons.push('The voice is already wide, so the shared reverb that blends it with the music stays moderate.'); }
+    else { e.verb = 0.45; reasons.push('A shared reverb puts the voice and the music in one room.'); }
   } else {
     const dry = spaceOf(live.filter((r) => !['bass', 'drums'].includes(r.category)));
-    if (!has('drums') && dry < 0.8) { e.verb = 0; reasons.push('Your stems already have their own space, so reverb stays off.'); }
-    else if (dry < 0.8) { e.verb = 0.1; reasons.push('Your stems already have their own space, so reverb stays low.'); }
-    else e.verb = 0.25;
+    if (!has('drums') && dry < 0.8) { e.verb = 0.15; reasons.push('Your stems are already wide and spacious, so only a little shared reverb is added.'); }
+    else if (dry < 0.8) { e.verb = 0.25; reasons.push('Your stems are already wide, so the shared reverb stays moderate.'); }
+    else { e.verb = 0.35; reasons.push('A shared reverb puts the parts in one room.'); }
   }
   if (rough) reasons.push('Your rough mix sets the balance and tone.');
   else if (moved && rows.length > 1 && rows.every((r) => r.m.lufs + r.m.crest > -1)) reasons.push('Every stem peaks right at the top, so they were probably levelled one by one, which may be why some had to move. If you have the finished song, add it as your rough mix and MIXIT will read each stem’s level from it.');

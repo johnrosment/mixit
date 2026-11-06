@@ -143,6 +143,58 @@ function keepSlowLevel(chs, sr, before) {
   return most;
 }
 
+// --- Section balance (Auto mix): how far each group has moved against the others, section by section ---
+// Compressors, glue and dips can each move a group a little in one section and not another, and
+// together that can lift a choir over the music where it carries the song. Measured in 8 s windows
+// every 4 s as each group's own change, less the change the groups share there, with its change over
+// the whole song taken out.
+const BAL_WIN = 80, BAL_STEP = 40; // hops of 0.1 s
+const BAL_TOL = 2;                 // dB a group may move against the others in a section
+const BAL_BACK = 1;                // dB it is brought back to when it moves further
+const BAL_HEARD = 0.01;            // share of the mix's energy (-20 dB) below which a group is not judged
+const middleOf = (list) => { const s = [...list].sort((a, b) => a - b), k = s.length >> 1; return s.length % 2 ? s[k] : (s[k - 1] + s[k]) / 2; };
+function sectionDrift(came, now) {
+  const keys = Object.keys(came);
+  const H = Math.min(...keys.map((k) => Math.min(came[k].length, now[k].length)));
+  const wins = Math.max(0, Math.floor((H - BAL_WIN) / BAL_STEP) + 1);
+  const sums = (e) => Array.from({ length: wins }, (_, w) => { let s = 0; for (let j = w * BAL_STEP; j < w * BAL_STEP + BAL_WIN; j++) s += e[j]; return s; });
+  const c = keys.map((k) => sums(came[k])), o = keys.map((k) => sums(now[k]));
+  const allC = c[0].map((_, w) => c.reduce((p, x) => p + x[w], 0)), allO = o[0].map((_, w) => o.reduce((p, x) => p + x[w], 0));
+  const topAll = Math.max(...allC);
+  // Each group's own change, only where it can be heard: under BAL_HEARD of the mix it is a tail or a
+  // breath, and judging it there would pull its real entrances toward its quietest moments.
+  const own = keys.map((k, a) => {
+    const topK = Math.max(...c[a]);
+    return c[a].map((ck, w) => (ck < 1e-3 * topK || allC[w] < 1e-3 * topAll || o[a][w] <= 0 || allO[w] <= 0 || (ck < BAL_HEARD * allC[w] && o[a][w] < BAL_HEARD * allO[w]) ? null : 10 * Math.log10(o[a][w] / ck)));
+  });
+  // The change the groups share in a window is not a change of balance. The middle one is taken, not
+  // the whole mix's, so a group that carries a section cannot pass its own move on to the rest.
+  const shared = c[0].map((_, w) => { const v = own.map((x) => x[w]).filter((x) => x != null); return v.length ? middleOf(v) : null; });
+  const drift = {};
+  keys.forEach((k, a) => {
+    const d = own[a].map((x, w) => (x == null ? null : x - shared[w]));
+    const live = d.filter((x) => x != null);
+    if (live.length < 2) return;
+    const mid = middleOf(live);
+    drift[k] = d.map((x) => (x == null ? null : x - mid));
+  });
+  let worst = null;
+  for (const [k, d] of Object.entries(drift)) d.forEach((x, w) => { if (x != null && (!worst || Math.abs(x) > Math.abs(worst.db))) worst = { key: k, db: x, at: (w * BAL_STEP + BAL_WIN / 2) * 0.1 }; });
+  return { drift, worst };
+}
+
+const movingAverage = (v, w) => { const s = new Float64Array(v.length + 1); for (let j = 0; j < v.length; j++) s[j + 1] = s[j] + v[j]; const h = w >> 1; return Float64Array.from(v, (_, j) => { const a = Math.max(0, j - h), b = Math.min(v.length, j + h + 1); return (s[b] - s[a]) / (b - a); }); };
+/** A gain in dB per hop, straight lines between hop centres. */
+function hopGains(chs, db, hop) {
+  const H = db.length, n = chs[0].length, k = Float64Array.from(db, (d) => Math.pow(10, d / 20));
+  for (let h = 0; h < H; h++) {
+    const a = h * hop + hop / 2, ka = k[h], kb = k[Math.min(H - 1, h + 1)];
+    const i0 = h === 0 ? 0 : Math.round(a), i1 = h === H - 1 ? n : Math.round(a + hop);
+    if (ka === 1 && kb === 1) continue;
+    for (let i = i0; i < Math.min(n, i1); i++) { const g = i < a ? ka : ka + ((kb - ka) * (i - a)) / hop; for (const ch of chs) ch[i] *= g; }
+  }
+}
+
 // The bus a stem counts toward when matching your rough mix.
 const roughBusOf = (st) => (st.category in BUS_TARGETS ? st.category : 'music');
 
@@ -329,11 +381,12 @@ export class MixSession {
       const d = deess(chs, sr, { amount: 0.35, split: 6000 });
       row.steps.push(`Cymbal harshness tamed: active ${d.activePct.toFixed(1)}%, max ${d.maxGr.toFixed(1)} dB above 6 kHz`);
     }
-    // Auto mix keeps how loud each part is from one section to the next: its compressor still evens out
-    // notes and words, but measured over a few seconds the part comes out as loud as it went in. (Set
-    // from the whole stem, a compressor works harder on the loud sections, and the quiet ones climb.)
+    // Each part keeps how loud it is from one section to the next: its compressor still evens out notes
+    // and words, but measured over a few seconds the part comes out as loud as it went in. (Set from the
+    // whole stem, a compressor works harder on the loud sections, and the quiet ones climb.) Not for
+    // dialogue, where evening out phrases is the point.
     let slowIn = null;
-    const holdSlow = () => { if (!slowIn && this.s.autoHold && !post && audible && st.comp > 0.01) slowIn = slowLevel(chs, sr); };
+    const holdSlow = () => { if (!slowIn && !post && audible && st.comp > 0.01) slowIn = slowLevel(chs, sr); };
     if (st.category === 'vocals' && audible) {
       // Narrow cuts where the voice sounds boxy (400-800 Hz) or nasal (2-4 kHz).
       const cuts = this.s.flat ? [] : resonantCuts(chs, sr, [[400, 800, 'boxy'], [2000, 4000, 'nasal']], { minDb: 4, maxCut: 2.5, q: 4, trendBands: 4 });
@@ -440,6 +493,14 @@ export class MixSession {
     }
     // Backing vocals get extra reverb; their send is taken here and follows the vocal bus level later.
     const supportVerb = this.used.vocalSupport ? B.vocalSupport.map((ch) => Float32Array.from(ch, (v) => v * 0.5)) : null;
+    // The lead voice alone (mid only) keys the vocal rider and the music's dip, so backing parts and
+    // choirs that carry a section on their own are neither lifted to the lead's level nor ducked under.
+    let leadKey = null;
+    if (!post && this.used.vocalLead && this.used.vocalSupport) {
+      const [l, r] = B.vocalLead, m = new Float32Array(n);
+      for (let i = 0; i < n; i++) m[i] = 0.5 * (l[i] + r[i]);
+      leadKey = [m, m];
+    }
     const vocals = B.vocalLead;
     addInto(vocals, B.vocalSupport, 1);
     const buses = { vocals, drums: B.drums, bass: B.bass, music: B.music, fx: B.fx, ambience: B.ambience };
@@ -546,7 +607,9 @@ export class MixSession {
         const t = s.bassTightness ?? 0.5;
         if (!s.flat || t > 0.01) {
           toneEq(b, sr, { hpf: 25 + t * 20, extra: [{ type: 'peaking', freq: 250, q: 1, gain: -t * 2 }] });
+          const slow = post ? null : slowLevel(b, sr); // (notes even out, sections keep their level)
           const c = compress(b, sr, { ratio: 2 + 3 * t, attack: 10, release: 90, knee: 6, rmsMs: 8, thresholdPct: 0.7, thresholdOffset: -6 * t });
+          if (slow) keepSlowLevel(b, sr, slow);
           rep.tightness = `HPF ${(25 + t * 20).toFixed(0)} Hz, 250 Hz ${fmt(-t * 2)} dB, compression avg ${c.avgGr.toFixed(1)} dB`;
         }
         const grit = s.bassGrit ?? 0.3;
@@ -583,8 +646,12 @@ export class MixSession {
       if (TONES[cfg.tone] && TONES[cfg.tone].length) toneEq(b, sr, { extra: TONES[cfg.tone] });
       if ((cfg.width ?? 1) !== 1) width(b, { amount: cfg.width, sr, monoHz: 0 });
       if ((cfg.glue || 0) > 0.01 && !skipGlue) {
+        // In a song, a bus's glue evens out hits and phrases, not sections: a part that is louder in the
+        // chorus stays louder there, and the bus keeps the level its balance gave it.
+        const slow = post ? null : slowLevel(b, sr);
         const c = compress(b, sr, { ratio: 1.5 + 2.5 * cfg.glue, attack: 20, release: glueRelease || 150, knee: 8, rmsMs: 10, thresholdPct: 0.7, thresholdOffset: -6 * cfg.glue, adaptive: true });
         rep.glue = { ratio: c.ratio, avgGr: c.avgGr, maxGr: c.maxGr };
+        if (slow) keepSlowLevel(b, sr, slow);
       }
     }
 
@@ -593,9 +660,13 @@ export class MixSession {
     const instrumental = stereoBuf(n);
     for (const key of ['drums', 'bass', 'music', 'fx']) if (used[key]) addInto(instrumental, buses[key], 1);
     let rider = null;
-    if (!post && used.vocals && (s.riderStrength || 0) > 0.01 && (used.music || used.drums || used.bass)) {
-      rider = this.vocalRider(buses.vocals, instrumental, s.riderStrength, s.riderWindow || 1.5);
-      log.push(`Vocal rider: kept the vocal-to-music ratio near ${rider.targetDiff.toFixed(1)} LU, moving the vocal between ${fmt(rider.minDb)} and ${fmt(rider.maxDb)} dB across sections.`);
+    // Your rough mix already has the vocal where it sits against the music, and has made its own room
+    // for it, so the vocal is not ridden and the music does not dip, unless you set those yourself.
+    const roomFromRough = !post && roughSet && !s.roomTouched;
+    if (roomFromRough && used.vocals && ((s.riderStrength || 0) > 0.01 || (s.duckAmount || 0) > 0)) log.push('Your rough mix already makes room for the vocal, so the vocal is not ridden and the music does not dip under it.');
+    if (!post && !roomFromRough && used.vocals && (s.riderStrength || 0) > 0.01 && (used.music || used.drums || used.bass)) {
+      rider = this.vocalRider(buses.vocals, instrumental, s.riderStrength, s.riderWindow || 1.5, leadKey);
+      log.push(`Vocal rider: kept the ${leadKey ? 'lead ' : ''}vocal-to-music ratio near ${rider.targetDiff.toFixed(1)} LU, moving the vocal between ${fmt(rider.minDb)} and ${fmt(rider.maxDb)} dB across sections${leadKey ? ' (only where the lead sings)' : ''}.`);
     }
 
     // --- Ducking ---
@@ -618,13 +689,14 @@ export class MixSession {
       const parts = [musicPart, postDucks.fx ? `effects ${fmt(-postDucks.fx.amountDb)} dB` : null, postDucks.ambience ? `ambience ${fmt(-postDucks.ambience.amountDb)} dB` : null].filter(Boolean);
       if (parts.length) log.push(`Under the dialogue: ${parts.join(', ')}, coming back up in pauses.`);
     }
-    if (!post && used.vocals && used.music && (s.duckAmount || 0) > 0) {
-      duck = this.duckUnderVocals(buses.music, buses.vocals, s.duckAmount, s.duckRelease || 180);
-      log.push(`Music ducks up to ${s.duckAmount} dB in the vocal range (250 Hz-5 kHz) while the vocal is active; average ${duck.avgGr.toFixed(2)} dB.`);
+    const duckKey = leadKey || buses.vocals;
+    if (!post && !roomFromRough && used.vocals && used.music && (s.duckAmount || 0) > 0) {
+      duck = this.duckUnderVocals(buses.music, duckKey, s.duckAmount, s.duckRelease || 180);
+      log.push(`Music ducks up to ${s.duckAmount} dB in the vocal range (250 Hz-5 kHz) while the ${leadKey ? 'lead ' : ''}vocal is active; average ${duck.avgGr.toFixed(2)} dB.`);
     }
-    if (!post && used.vocals && used.drums && (s.duckAmount || 0) > 0) {
+    if (!post && !roomFromRough && used.vocals && used.drums && (s.duckAmount || 0) > 0) {
       // Kick harmonics and snare snap (2-5 kHz) step back a little while the vocal sings.
-      const dd = this.duckUnderVocals(buses.drums, buses.vocals, Math.min(2, 0.4 * s.duckAmount), s.duckRelease || 180, { lo: 2000, hi: 5000, hiShare: 0 });
+      const dd = this.duckUnderVocals(buses.drums, duckKey, Math.min(2, 0.4 * s.duckAmount), s.duckRelease || 180, { lo: 2000, hi: 5000, hiShare: 0 });
       log.push(`Drums dip up to ${Math.min(2, 0.4 * s.duckAmount).toFixed(1)} dB between 2 and 5 kHz under the vocal, so snare snap and kick click do not mask it (average ${dd.avgGr.toFixed(2)} dB).`);
     }
     if (used.drums && used.bass && (s.bassDuck || 0) > 0) {
@@ -700,6 +772,38 @@ export class MixSession {
         list: moves.map((m) => ({ start: m.start, end: m.end, label: m.label, rel: m.rel, lufs: m.lufs, offsets: m.offsets || {}, gains: m.gains, width: m.width, send: m.send, lows: m.lows, highs: m.highs })),
       };
       log.push(`Section automation: ${moves.length} section${moves.length > 1 ? 's' : ''} ${edited ? '(your edited boundaries)' : 'found'} (${moves.map((m) => m.label).join(', ')}). ${moves.filter((m) => Object.values(m.gains).some((g) => Math.abs(g) >= 0.05)).map((m) => `${fmtTime(m.start)} ${m.label}: ${Object.entries(m.gains).filter(([k, g]) => used[k] && Math.abs(g) >= 0.05).map(([k, g]) => `${k} ${fmt(g)}`).join(', ')} dB`).join('; ') || 'No level moves.'}`);
+    }
+
+    // --- Section balance (Auto mix keeps each group's place in the mix, section by section) ---
+    let sectionBalance = null;
+    if (balance && s.autoHold && this.holdBus && !sections) {
+      progress('Checking each section', 0.58);
+      const keys = BUS_KEYS.filter((k) => used[k] && this.holdBus[k]);
+      if (keys.length >= 2) {
+        const came = Object.fromEntries(keys.map((k) => [k, this.holdBus[k].energy]));
+        const now = Object.fromEntries(keys.map((k) => [k, hopEnergies(buses[k], sr).energy]));
+        let check = sectionDrift(came, now);
+        const first = check.worst;
+        const fixed = new Set();
+        const hop = this.holdBus[keys[0]].hop;
+        for (let pass = 0; pass < 3 * keys.length && check.worst && Math.abs(check.worst.db) > BAL_TOL; pass++) {
+          const k = check.worst.key, d = check.drift[k];
+          // The whole of each window that is too far off moves back, ramped over 1 s.
+          const move = new Float64Array(now[k].length);
+          d.forEach((x, w) => {
+            if (x == null || Math.abs(x) <= BAL_TOL) return;
+            const v = -(x - Math.max(-BAL_BACK, Math.min(BAL_BACK, x)));
+            for (let j = w * BAL_STEP; j < Math.min(move.length, w * BAL_STEP + BAL_WIN); j++) if (Math.abs(v) > Math.abs(move[j])) move[j] = v;
+          });
+          hopGains(buses[k], movingAverage(move, 10), hop);
+          now[k] = hopEnergies(buses[k], sr).energy;
+          fixed.add(k);
+          check = sectionDrift(came, now);
+        }
+        sectionBalance = { tol: BAL_TOL, first, last: check.worst, fixed: [...fixed] };
+        const say = (x) => `${fmt(x.db)} dB for ${x.key} at ${fmtTime(x.at)}`;
+        if (first) log.push(fixed.size ? `In one section ${say(first)} against the other parts, so ${[...fixed].join(' and ')} went back toward how ${fixed.size > 1 ? 'they' : 'it'} came in there (now at most ${say(check.worst)}).` : `Each group kept its place from one section to the next: at most ${say(first)} against the other parts.`);
+      }
     }
 
     // --- Effects returns ---
@@ -856,9 +960,12 @@ export class MixSession {
         const gated = dialogueLoudness(mix, buses.vocals, sr), whole = integratedLufs(mix, sr);
         if (gated != null && whole > -70) targetLufs += whole - gated;
       }
-      const f = finalize(mix, sr, { targetLufs, ceiling: s.ceiling ?? -1 });
-      out = f.chs; outGain = f.gainDb; limiter = { maxGr: f.limiter.maxGr, avgGr: f.limiter.avgGr, curve: f.limiter.curve, stepSec: f.limiter.curveStepSec };
-      log.push(`Output: ${f.achievedLufs.toFixed(2)} LUFS at ${f.truePeakDbtp.toFixed(2)} dBTP through the true-peak limiter (max ${f.limiter.maxGr.toFixed(1)} dB).`);
+      // A mix keeps its peaks: the limiter only catches the highest of them (s.limitMaxGr), and a dense
+      // song lands a little under the target rather than being flattened to reach it (but not under
+      // s.limitFloorLufs).
+      const f = finalize(mix, sr, { targetLufs, ceiling: s.ceiling ?? -1, maxGr: post ? null : s.limitMaxGr ?? null, minLufs: post ? null : s.limitFloorLufs ?? null });
+      out = f.chs; outGain = f.gainDb; limiter = { maxGr: f.limiter.maxGr, avgGr: f.limiter.avgGr, curve: f.limiter.curve, stepSec: f.limiter.curveStepSec, limitedBy: f.limitedBy };
+      log.push(`Output: ${f.achievedLufs.toFixed(2)} LUFS at ${f.truePeakDbtp.toFixed(2)} dBTP through the true-peak limiter (max ${f.limiter.maxGr.toFixed(1)} dB).${f.limitedBy > 0.1 ? ` Reaching ${targetLufs} LUFS would have flattened the peaks, so the mix stays ${f.limitedBy.toFixed(1)} dB under it.` : ''}`);
     } else {
       const tp = truePeak(mix, sr).dbtp;
       outGain = (s.headroom ?? -6) - tp;
@@ -959,6 +1066,7 @@ export class MixSession {
         settings: s,
         sampleRate: sr,
         heldRange,
+        sectionBalance,
         rawSumLufs,
         rawSumTruePeak,
         stems: this.stemReports,
@@ -983,9 +1091,11 @@ export class MixSession {
     };
   }
 
-  vocalRider(vocals, inst, strength, windowSec) {
+  /** Rides `vocals` against `inst`, judged by `key` (the lead alone, when there are backing parts too). */
+  vocalRider(vocals, inst, strength, windowSec, key = null) {
     const sr = this.sr, n = this.n;
-    const hv = hopEnergies(vocals, sr), hi = hopEnergies(inst, sr);
+    const judged = key || vocals;
+    const hv = hopEnergies(judged, sr), hi = hopEnergies(inst, sr);
     const H = hv.energy.length;
     const lv = new Float32Array(H), li = new Float32Array(H);
     for (let j = 0; j < H; j++) {
@@ -995,7 +1105,7 @@ export class MixSession {
       lv[j] = ev > 0 ? -0.691 + 10 * Math.log10(ev / cnt) : -120;
       li[j] = ei > 0 ? -0.691 + 10 * Math.log10(ei / cnt) : -120;
     }
-    const vocI = integratedLufs(vocals, sr);
+    const vocI = integratedLufs(judged, sr);
     const active = [];
     for (let j = 0; j < H; j++) if (lv[j] > vocI - 15 && li[j] > -70) active.push(lv[j] - li[j]);
     if (!active.length) return { targetDiff: 0, minDb: 0, maxDb: 0, curve: new Float32Array(0), stepSec: 0.1 };
@@ -1003,9 +1113,12 @@ export class MixSession {
     const target = active[Math.floor(active.length / 2)];
     const maxMove = 4 * strength;
     const want = new Float32Array(H);
-    let last = 0;
+    let last = 0, quiet = 0;
     for (let j = 0; j < H; j++) {
-      if (lv[j] > vocI - 15 && li[j] > -70) last = Math.max(-maxMove, Math.min(maxMove, (target - (lv[j] - li[j])) * 0.7));
+      if (lv[j] > vocI - 15 && li[j] > -70) { last = Math.max(-maxMove, Math.min(maxMove, (target - (lv[j] - li[j])) * 0.7)); quiet = 0; }
+      // Over a breath the move holds; once the lead has been out for 2 s (a section the backing
+      // parts carry), the vocal goes back to where it came in.
+      else if (key && ++quiet > 20) last = 0;
       want[j] = last;
     }
     // Moving-average smoothing over the section window. Both the 400 ms level

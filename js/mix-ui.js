@@ -52,7 +52,7 @@ export const MIX_DEFAULTS = {
   duckAmount: 2.5, duckRelease: 180,
   reverbEnabled: true, reverbKind: 'plate', reverbDecay: 1.3, reverbPredelay: 25, reverbLevel: -14,
   delayEnabled: false, delayTime: 300, delayFeedback: 0.28, delayPingpong: true, delayLevel: -18,
-  mixGlue: 0.25, mixLow: 0, mixHigh: 0, mixTape: 0, outputMode: 'headroom', headroom: -6, targetLufs: -14, ceiling: -1,
+  mixGlue: 0.35, mixLow: 0, mixHigh: 0, mixTape: 0, outputMode: 'headroom', headroom: -6, targetLufs: -14, ceiling: -1,
   bitDepth: 24, dither: 'tpdf', outputRate: 0, renderBusStems: true,
   spatial: 'off', spatialCentre: 0.6, spatialLfe: -12,
   tuneKey: 'auto', sectionAuto: 0,
@@ -175,7 +175,11 @@ const SCHEMA = [
 ];
 
 // ---- Easy page: eight plain sliders mapped onto the full mix engine ----
-const EASY_LUFS = -12;
+// Streaming level. The limiter only catches peaks (up to 6 dB on a short hit, but more than 1 dB for at
+// most 3% of the time), so a dense song lands a little under it instead of being flattened to reach it.
+const EASY_LUFS = -14;
+const EASY_LIMIT_DB = 6;
+const EASY_FLOOR_LUFS = -16; // Apple Music's level: a very peaky song takes a little more limiting to reach it
 const EASY_DEFAULTS = { vocal: 0, clarity: 0, lows: 0, highs: 0, punch: 0.5, verb: 0.4, echo: 0, tape: 0 };
 const EASY = [
   { key: 'vocal', label: 'Vocal level', help: 'How loud the voice is.', min: -1, max: 1, def: 0, ends: ['Tucked in', 'Up front'], show: (v) => easyWords(v, { lo: 'Quieter', hi: 'Louder', off: '' }) },
@@ -204,8 +208,8 @@ function easyMixValues(e) {
       reverbEnabled: e.verb > 0.02, reverbLevel: q(-20 + 12 * e.verb, 0.5), reverbDecay: q(1 + 1.4 * e.verb, 0.1),
       delayEnabled: e.echo > 0.02, delayLevel: q(-26 + 12 * e.echo, 0.5), delayFeedback: q(0.2 + 0.25 * e.echo, 0.01),
       mixTape: e.tape,
-      // -2 dBTP: Spotify's advice for anything louder than -14 LUFS.
-      outputMode: 'loudness', targetLufs: EASY_LUFS, ceiling: -2, renderBusStems: true, spatial: 'off', sectionAuto: 0,
+      // -1 dBTP: Spotify's advice at -14 LUFS, and room for the MP3.
+      outputMode: 'loudness', targetLufs: EASY_LUFS, ceiling: -1, limitMaxGr: EASY_LIMIT_DB, limitFloorLufs: EASY_FLOOR_LUFS, renderBusStems: true, spatial: 'off', sectionAuto: 0,
     },
     buses: structuredClone(BUS_DEFAULTS),
   };
@@ -331,7 +335,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
   function renderEasyHint() {
     const hint = document.querySelector('#tab-mix .easy-view .render-bar + .hint');
     const d = DELIVERY[state.easyPost.delivery];
-    if (hint) hint.textContent = `${project === 'post' ? `Comes out at ${d?.label || 'your chosen'} loudness (${d?.gate ? 'dialogue at ' : ''}${d?.lufs} LUFS).` : 'Comes out at streaming volume (-12 LUFS).'} Auto mix listens first, then sets the sliders and mixes.`;
+    if (hint) hint.textContent = `${project === 'post' ? `Comes out at ${d?.label || 'your chosen'} loudness (${d?.gate ? 'dialogue at ' : ''}${d?.lufs} LUFS).` : 'Comes out at streaming volume (-14 LUFS), with its peaks kept.'} Auto mix listens first, then sets the sliders and mixes.`;
   }
   renderEasy();
   // Results sit under the Easy controls, or below the stem routing in Advanced.
@@ -635,7 +639,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
       declick: v.declick, editFades: v.editFades, frameRate: v.frameRate, dialogueHum: v.dialogueHum, shareMics: v.shareMics,
       outputMode: 'loudness', targetLufs: d.lufs, ceiling: d.ceiling, riderStrength: 0, sectionAuto: 0, alternates: false,
       buses, reverb: { enabled: (v.dialogueRoom || 0) > 0.01, kind: 'room', decay: 0.6, predelay: 10, level: -16 }, delay: { enabled: false },
-      vocalChorus: 0, mixTape: 0, mixGlue: 0.6 * v.mixGlue,
+      vocalChorus: 0, mixTape: 0, mixGlue: 0.43 * v.mixGlue,
     };
   }
   function engineBase(sessionStems, job) {
@@ -654,11 +658,13 @@ export function initMix({ engine, sendToMaster, onMode }) {
       vocalChorus: v.vocalChorus, drumParallel: v.drumParallel, drumDrive: v.drumDrive, bassGrit: v.bassGrit, delaySync: v.delaySync, musicCleanup: v.musicCleanup, alternates: v.alternates,
       autoBalance: v.autoBalance, balanceAmount: v.balanceAmount, roughTone: v.roughTone, vocalLevel: v.vocalLevel, vocalPresence: v.vocalPresence, riderStrength: state.autoHold && job.mode === 'easy' ? 0 : v.riderStrength, riderWindow: v.riderWindow,
       transientEnergy: v.transientEnergy, bassTightness: v.bassTightness, bassDuck: v.bassDuck, stereoWidth: v.stereoWidth,
-      duckAmount: state.autoHold && state.autoRough && state.rough && job.mode === 'easy' ? 0 : v.duckAmount, duckRelease: v.duckRelease, mixGlue: v.mixGlue,
+      duckAmount: v.duckAmount, duckRelease: v.duckRelease, mixGlue: v.mixGlue,
+      // Ducking and the vocal rider set by hand in Advanced are used even with a rough mix.
+      roomTouched: job.mode === 'advanced' && (v.duckAmount !== MIX_DEFAULTS.duckAmount || v.riderStrength !== MIX_DEFAULTS.riderStrength),
       buses: structuredClone(job.buses),
       reverb: { enabled: v.reverbEnabled, kind: v.reverbKind, decay: v.reverbDecay, predelay: v.reverbPredelay, level: v.reverbLevel },
       delay: { enabled: v.delayEnabled, time: v.delayTime, feedback: v.delayFeedback, pingpong: v.delayPingpong, level: v.delayLevel },
-      outputMode: v.outputMode, headroom: v.headroom, targetLufs: v.targetLufs, ceiling: v.ceiling, renderBusStems: v.renderBusStems,
+      outputMode: v.outputMode, headroom: v.headroom, targetLufs: v.targetLufs, ceiling: v.ceiling, limitMaxGr: v.limitMaxGr ?? null, limitFloorLufs: v.limitFloorLufs ?? null, renderBusStems: v.renderBusStems,
       spatial: v.spatial !== 'off' ? { layout: v.spatial, centre: v.spatialCentre, lfeDb: v.spatialLfe <= -30 ? -99 : v.spatialLfe, targetLufs: -18, ceiling: -1 } : null,
     };
   }
@@ -743,7 +749,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
     if (mode === 'advanced') {
       // Advanced takes the same choices, keeping its own output and file settings.
       const m = project === 'post' ? easyPostValues(state.easyPost) : easyMixValues(state.easy);
-      const keep = Object.fromEntries(['project', 'delivery', 'bitDepth', 'dither', 'outputRate', 'renderBusStems', 'outputMode', 'headroom', 'targetLufs', 'ceiling', 'spatial', 'spatialCentre', 'spatialLfe', 'alternates'].map((k) => [k, state.values[k]]));
+      const keep = Object.fromEntries(['project', 'delivery', 'bitDepth', 'dither', 'outputRate', 'renderBusStems', 'outputMode', 'headroom', 'targetLufs', 'ceiling', 'limitMaxGr', 'limitFloorLufs', 'spatial', 'spatialCentre', 'spatialLfe', 'alternates'].map((k) => [k, state.values[k]]));
       Object.assign(state.values, m.values, keep);
       // Auto mix keeps each section's balance as it found it, so the vocal is not ridden against the music.
       // With your rough mix it already has room for the vocal, so the music does not dip under it as well.
@@ -758,7 +764,6 @@ export function initMix({ engine, sendToMaster, onMode }) {
     for (const st of state.stems) resetStem(st);
     // What the plan moved stays on the stems, so rendering again gives the same mix.
     state.autoHold = !!auto.hold;
-    state.autoRough = !!auto.rough;
     (auto.stems || []).forEach((move, i) => {
       const st = stems[i];
       st.gain = move.gainDb;
@@ -885,7 +890,7 @@ export function initMix({ engine, sendToMaster, onMode }) {
     };
     const items = [
       { label: 'Download all (ZIP)', sub: r.busStems ? 'the mix and every stem below' : 'every file below', primary: true, easy: true, run: async () => download(makeZip(await packageFiles(document.documentElement.dataset.mode !== 'easy')), 'mix_all.zip') },
-      { label: 'Mix WAV', sub: `${fx(out.loudness.integrated, 1)} LUFS · ${fx(out.peak.truePeakDbtp, 1)} dBTP`, easy: true, run: async () => { const f = await wav(r.channels, 'mix.wav'); download(f.data, f.name, 'audio/wav'); } },
+      { label: 'Mix WAV', sub: `${fx(out.loudness.integrated, 1)} LUFS · ${fx(out.peak.truePeakDbtp, 1)} dBTP${(rep.limiter?.limitedBy || 0) > 0.1 ? ' · a little under streaming volume so its peaks are not flattened' : ''}`, easy: true, run: async () => { const f = await wav(r.channels, 'mix.wav'); download(f.data, f.name, 'audio/wav'); } },
       { label: 'Mix MP3', sub: `${kbps} kbps · about ${mp3SizeMb(kbps, secs).toFixed(1)} MB · for sharing`, easy: true, run: async () => { const f = await mixMp3(); download(f.data, f.name, 'audio/mpeg'); } },
       ...(r.video ? [{ label: 'Video with this mix', sub: 'picture untouched · AAC sound', easy: true, run: async () => download(await replaceVideoSound(r.video, { sr: r.sr, channels: r.channels }, { peakDbtp: out.peak.truePeakDbtp }), videoOutName(r.video.name, 'mix')) }] : []),
       ...Object.entries(r.busStems || {}).map(([k, chs]) => ({ label: `${busName(k)} stem`, sub: 'WAV, processed', easy: true, run: async () => { const f = await wav(chs, `${busFile(k)}.wav`); download(f.data, f.name, 'audio/wav'); } })),

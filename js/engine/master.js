@@ -78,14 +78,22 @@ function clampGain(db) {
 }
 
 /** Loudness targeting through the true-peak limiter, iterating the gain. */
-export function finalize(chs, sr, { targetLufs, ceiling, lookahead = 5, release = 80, weights = null }, cache = {}) {
+const LIGHT_OVER1 = 0.03, LIGHT_OVER3 = 0.005; // share of the time a light limiter may take more than 1 dB, and 3 dB
+/**
+ * Level to `targetLufs` through the true-peak limiter at `ceiling`. With `maxGr`, the limiter only
+ * catches peaks (see below): a song that would need more to reach the target comes out quieter instead
+ * of flattened, though never under `minLufs` (`limitedBy` says how far short of the target it stopped).
+ */
+export function finalize(chs, sr, { targetLufs, ceiling, lookahead = 5, release = 80, weights = null, maxGr = null, minLufs = null }, cache = {}) {
   const env = cache.env || (cache.env = peakEnvelope(chs, sr));
   const pre = cache.lufs ?? (cache.lufs = integratedLufs(chs, sr, weights));
   let gainDb = clampGain(targetLufs - pre);
   const out = chs.map((c) => new Float32Array(c.length));
   let lim = null, achieved = pre, iterations = 0;
   // Secant search: the loudness gained per dB of gain shrinks as the limiter works harder.
+  let ceilUsed = ceiling - 0.05;
   const search = (ceil) => {
+    ceilUsed = ceil;
     let prevGain = null, prevAch = null;
     for (let it = 0; it < 8; it++) {
       iterations++;
@@ -107,6 +115,37 @@ export function finalize(chs, sr, { targetLufs, ceiling, lookahead = 5, release 
     search(ceiling - 0.05 - (tp.dbtp - ceiling));
     tp = truePeak(out, sr);
   }
+  // Too much limiting for the song: back the gain off until the limiter only catches the peaks. Short
+  // hits may lose up to `maxGr` dB, but held parts must not be pressed against the ceiling: more than
+  // 1 dB for at most 3% of the time, more than 3 dB for at most 0.5%.
+  let limitedBy = 0;
+  const busy = (l) => { const c = l.curve || []; let a = 0, b = 0; for (const v of c) { const x = Math.abs(v); if (x > 1) a++; if (x > 3) b++; } return c.length ? [a / c.length, b / c.length] : [0, 0]; };
+  const tooHard = (l) => { const [a, b] = busy(l); return l.maxGr > maxGr + 0.05 || a > LIGHT_OVER1 || b > LIGHT_OVER3; };
+  if (maxGr != null && lim && tooHard(lim)) {
+    const wanted = achieved, ceil = ceilUsed;
+    let hi = gainDb, lo = clampGain(gainDb - 15);
+    for (let it = 0; it < 9; it++) {
+      iterations++;
+      const mid = (lo + hi) / 2;
+      const l = limitWithEnvelope(chs, sr, env, { gainDb: mid, ceilingDb: ceil, lookaheadMs: lookahead, releaseMs: release, out });
+      if (tooHard(l)) hi = mid; else lo = mid;
+    }
+    gainDb = lo;
+    lim = limitWithEnvelope(chs, sr, env, { gainDb, ceilingDb: ceil, lookaheadMs: lookahead, releaseMs: release, out });
+    tp = truePeak(out, sr);
+    if (tp.dbtp > ceiling + 0.05) { lim = limitWithEnvelope(chs, sr, env, { gainDb, ceilingDb: ceil - (tp.dbtp - ceiling), lookaheadMs: lookahead, releaseMs: release, out }); tp = truePeak(out, sr); }
+    achieved = integratedLufs(out, sr, weights);
+    // Never quieter than `minLufs`: a very peaky song takes a little more limiting to get there.
+    if (minLufs != null && achieved < minLufs - 0.05) {
+      const keep = targetLufs;
+      targetLufs = minLufs;
+      search(ceiling - 0.05);
+      tp = truePeak(out, sr);
+      if (tp.dbtp > ceiling + 0.05) { search(ceiling - 0.05 - (tp.dbtp - ceiling)); tp = truePeak(out, sr); }
+      targetLufs = keep;
+    }
+    limitedBy = Math.max(0, wanted - achieved);
+  }
   let safety = 0;
   if (tp.dbtp > ceiling) {
     safety = ceiling - tp.dbtp - 0.02;
@@ -120,6 +159,7 @@ export function finalize(chs, sr, { targetLufs, ceiling, lookahead = 5, release 
     safetyTrimDb: safety,
     iterations,
     limiter: lim,
+    limitedBy,
   };
 }
 
